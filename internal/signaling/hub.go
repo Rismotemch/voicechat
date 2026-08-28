@@ -319,7 +319,7 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 				}
 			}
 			if len(ipStrings) > 0 {
-				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
+				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeSrflx)
 			}
 		}
 	}
