@@ -53,7 +53,7 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /opt/voicechat/
+            cd /opt/voicechat
             git pull
             docker compose down
             docker compose up -d --build
