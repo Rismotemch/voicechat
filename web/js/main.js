@@ -77,6 +77,14 @@ function loadUserFromStorage() {
 }
 
 async function joinRoom() {
+    // 1. Создаем и возобновляем AudioContext по первому жесту
+    if (!state.audioContext) {
+        state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (state.audioContext.state === 'suspended') {
+        await state.audioContext.resume();
+    }
+    
     const userName = elements.userName.value.trim();
     if (!userName) {
         alert('Пожалуйста, введите имя');
