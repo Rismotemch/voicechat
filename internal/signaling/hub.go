@@ -2,7 +2,6 @@ package signaling
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -327,20 +326,8 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		}
 	}
 
-	if h.cfg.Domain != "" && h.cfg.Domain != "localhost" {
-		if ips, err := net.LookupIP(h.cfg.Domain); err == nil && len(ips) > 0 {
-			var ipStrings []string
-			for _, ip := range ips {
-				if ipv4 := ip.To4(); ipv4 != nil {
-					ipStrings = append(ipStrings, ipv4.String())
-				}
-			}
-			if len(ipStrings) > 0 {
-				h.log.Info().Strs("ips", ipStrings).Msg("Setting NAT 1-to-1 IPs")
-				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
-			}
-		}
-	}
+	// НЕ используем NAT 1-to-1, так как у нас TURN
+	// Вместо этого полагаемся на TURN для relay
 
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
