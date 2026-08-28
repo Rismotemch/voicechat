@@ -3,13 +3,14 @@ package signaling
 import (
 	"encoding/json"
 	"net/http"
+	"net"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
 	"github.com/rs/zerolog"
-	"github.com/google/uuid"
 	"github.com/rismotemch/voicechat/internal/config"
 	"github.com/rismotemch/voicechat/internal/models"
 )
@@ -104,12 +105,12 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.RequireAuth && h.cfg.AuthToken != "" {
-    		token := r.URL.Query().Get("token")
-    		if token != h.cfg.AuthToken {
-        		h.log.Warn().Msg("Unauthorized WebSocket connection attempt")
-        		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-        		return
-    		}
+		token := r.URL.Query().Get("token")
+		if token != h.cfg.AuthToken {
+			h.log.Warn().Msg("Unauthorized WebSocket connection attempt")
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -411,15 +412,66 @@ func (h *Hub) removeClient(client *Client) {
 }
 
 func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, error) {
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: h.cfg.STUNServers,
-			},
-		},
+	// Создаём SettingEngine для настройки сети
+	settingEngine := webrtc.SettingEngine{}
+
+	// Настройка UDP портов
+	if h.cfg.UDPMin > 0 && h.cfg.UDPMax > 0 {
+		if err := settingEngine.SetEphemeralUDPPortRange(uint16(h.cfg.UDPMin), uint16(h.cfg.UDPMax)); err != nil {
+			h.log.Error().Err(err).Msg("Failed to set UDP port range")
+		}
 	}
 
-	peerConn, err := webrtc.NewPeerConnection(config)
+	// Если есть домен, используем его для ICE
+	if h.cfg.Domain != "" {
+		// Резолвим домен в IP
+		ips, err := net.LookupIP(h.cfg.Domain)
+		if err == nil && len(ips) > 0 {
+			var ipStrings []string
+			for _, ip := range ips {
+				if ipv4 := ip.To4(); ipv4 != nil {
+					ipStrings = append(ipStrings, ipv4.String())
+				}
+			}
+			if len(ipStrings) > 0 {
+				h.log.Info().
+					Strs("ips", ipStrings).
+					Msg("Setting NAT 1-to-1 IPs from domain")
+				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
+			}
+		} else {
+			h.log.Warn().Err(err).Msg("Failed to resolve domain to IP")
+		}
+	}
+
+	// Создаём API с настройками
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
+
+	// Создаём ICE серверы
+	var iceServers []webrtc.ICEServer
+
+	// Добавляем STUN серверы
+	if len(h.cfg.STUNServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs: h.cfg.STUNServers,
+		})
+	}
+
+	// Добавляем TURN серверы
+	if len(h.cfg.TURNServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:       h.cfg.TURNServers,
+			Username:   "openrelayproject",
+			Credential: "openrelayproject",
+		})
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: iceServers,
+	}
+
+	// Создаём PeerConnection через API
+	peerConn, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
@@ -427,6 +479,11 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	// Обработка ICE кандидатов
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
+			h.log.Debug().
+				Str("clientId", client.ID).
+				Str("candidate", candidate.String()).
+				Msg("Generated ICE candidate")
+
 			candidateMsg := ICECandidateMessage{
 				UserID:    client.User.ID,
 				Candidate: candidate.ToJSON(),
@@ -456,10 +513,23 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 			Msg("PeerConnection state changed")
 	})
 
+	// Логирование ICE состояния
+	peerConn.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		h.log.Debug().
+			Str("clientId", client.ID).
+			Str("iceState", state.String()).
+			Msg("ICE connection state changed")
+	})
+
 	return peerConn, nil
 }
 
 func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
+	h.log.Info().
+		Str("senderId", sender.ID).
+		Str("trackID", remoteTrack.ID()).
+		Msg("Starting track forwarding")
+
 	// Для каждого клиента в комнате
 	for _, client := range h.getClientsInRoom(sender.Room.ID) {
 		// Пропускаем отправителя
@@ -476,7 +546,7 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 			Str("fromUser", sender.User.ID).
 			Str("toUser", client.User.ID).
 			Str("trackID", remoteTrack.ID()).
-			Msg("Forwarding track")
+			Msg("Forwarding track to client")
 
 		// Создаём локальный трек
 		localTrack, err := webrtc.NewTrackLocalStaticRTP(
@@ -491,14 +561,15 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 
 		// Добавляем трек к PeerConnection клиента
 		if _, err := client.PeerConn.AddTrack(localTrack); err != nil {
-			h.log.Error().Err(err).Msg("Failed to add track")
+			h.log.Error().Err(err).Msg("Failed to add track to PeerConnection")
 			continue
 		}
 
-		// Запускаем пересылку пакетов
+		// Запускаем пересылку пакетов в отдельной горутине
 		go func(c *Client, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP) {
 			defer func() {
 				h.log.Debug().
+					Str("fromUser", sender.User.ID).
 					Str("toUser", c.User.ID).
 					Msg("Stopped forwarding track")
 			}()
@@ -506,10 +577,12 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 			for {
 				packet, _, err := remote.ReadRTP()
 				if err != nil {
+					h.log.Debug().Err(err).Msg("Failed to read RTP packet")
 					return
 				}
 
 				if err := local.WriteRTP(packet); err != nil {
+					h.log.Debug().Err(err).Msg("Failed to write RTP packet")
 					return
 				}
 			}

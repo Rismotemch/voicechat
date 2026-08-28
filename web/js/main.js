@@ -16,7 +16,17 @@ const state = {
 // WebRTC configuration
 const rtcConfig = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        {
+            urls: [
+                'turn:openrelay.metered.ca:80',
+                'turn:openrelay.metered.ca:443',
+                'turn:openrelay.metered.ca:443?transport=tcp'
+            ],
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+        }
     ]
 };
 
@@ -255,6 +265,19 @@ async function handleICECandidate(payload) {
 
 async function createPeerConnection() {
     console.log('Creating PeerConnection');
+
+    // Логирование состояния ICE
+    state.peerConnection.oniceconnectionstatechange = () => {
+	console.log('ICE connection state:', state.peerConnection.iceConnectionState);
+    };
+
+    state.peerConnection.onicegatheringstatechange = () => {
+	console.log('ICE gathering state:', state.peerConnection.iceGatheringState);
+    };
+
+    state.peerConnection.onsignalingstatechange = () => {
+	console.log('Signaling state:', state.peerConnection.signalingState);
+    };
     
     // Закрываем старое соединение если есть
     if (state.peerConnection) {
