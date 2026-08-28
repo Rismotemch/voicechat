@@ -234,12 +234,16 @@ func (c *Client) handleJoin(msg JoinMessage) {
 }
 
 func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
+	c.Hub.log.Info().Str("userId", msg.UserID).Msg("Received SDP offer")
+
 	if c.PeerConn != nil {
 		c.PeerConn.Close()
 	}
 
 	peerConn, err := c.Hub.createPeerConnection(c)
 	if err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to create PeerConnection")
+		c.sendMessage("error", ErrorMessage{Message: "Failed to create PeerConnection"})
 		return
 	}
 
@@ -247,28 +251,35 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 	c.PeerConn = peerConn
 	c.mu.Unlock()
 
+	// Добавляем все существующие треки
 	c.Hub.mu.RLock()
 	for trackID, track := range c.Hub.activeTracks {
 		ownerID := c.Hub.trackOwners[trackID]
 		if ownerID != c.ID {
-			c.PeerConn.AddTrack(track)
+			if _, err := c.PeerConn.AddTrack(track); err != nil {
+				c.Hub.log.Error().Err(err).Str("trackId", trackID).Msg("Failed to add existing track")
+			}
 		}
 	}
 	c.Hub.mu.RUnlock()
 
 	if err := peerConn.SetRemoteDescription(msg.Offer); err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to set remote description")
 		return
 	}
 
 	answer, err := peerConn.CreateAnswer(nil)
 	if err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to create answer")
 		return
 	}
 
 	if err := peerConn.SetLocalDescription(answer); err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to set local description")
 		return
 	}
 
+	// Добавляем отложенные ICE кандидаты
 	c.mu.Lock()
 	for _, cand := range c.pendingCandidates {
 		peerConn.AddICECandidate(cand)
@@ -287,7 +298,9 @@ func (c *Client) handleSDPAnswer(msg SDPAnswerMessage) {
 	defer c.mu.Unlock()
 
 	if c.PeerConn != nil {
-		c.PeerConn.SetRemoteDescription(msg.Answer)
+		if err := c.PeerConn.SetRemoteDescription(msg.Answer); err != nil {
+			c.Hub.log.Error().Err(err).Msg("Failed to set remote description from answer")
+		}
 	}
 }
 
@@ -300,14 +313,18 @@ func (c *Client) handleICECandidate(msg ICECandidateMessage) {
 		return
 	}
 
-	c.PeerConn.AddICECandidate(msg.Candidate)
+	if err := c.PeerConn.AddICECandidate(msg.Candidate); err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to add ICE candidate")
+	}
 }
 
 func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, error) {
 	settingEngine := webrtc.SettingEngine{}
 
 	if h.cfg.UDPMin > 0 && h.cfg.UDPMax > 0 {
-		settingEngine.SetEphemeralUDPPortRange(uint16(h.cfg.UDPMin), uint16(h.cfg.UDPMax))
+		if err := settingEngine.SetEphemeralUDPPortRange(uint16(h.cfg.UDPMin), uint16(h.cfg.UDPMax)); err != nil {
+			h.log.Error().Err(err).Msg("Failed to set UDP port range")
+		}
 	}
 
 	if h.cfg.Domain != "" && h.cfg.Domain != "localhost" {
@@ -319,15 +336,35 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 				}
 			}
 			if len(ipStrings) > 0 {
-				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeSrflx)
+				h.log.Info().Strs("ips", ipStrings).Msg("Setting NAT 1-to-1 IPs")
+				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
 			}
 		}
 	}
 
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
+	// Настраиваем ICE серверы
+	var iceServers []webrtc.ICEServer
+
+	// Добавляем STUN
+	if len(h.cfg.STUNServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs: h.cfg.STUNServers,
+		})
+	}
+
+	// Добавляем TURN
+	if len(h.cfg.TURNServers) > 0 {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:       h.cfg.TURNServers,
+			Username:   "voicechat",
+			Credential: "voicechat123",
+		})
+	}
+
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{},
+		ICEServers: iceServers,
 	}
 
 	peerConn, err := api.NewPeerConnection(config)
@@ -345,6 +382,7 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
+			h.log.Info().Str("candidate", candidate.String()).Msg("Generated ICE candidate")
 			client.sendMessage("ice_candidate", ICECandidateMessage{
 				UserID:    client.User.ID,
 				Candidate: candidate.ToJSON(),
@@ -353,7 +391,11 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	})
 
 	peerConn.OnTrack(func(remoteTrack *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		h.log.Info().Str("clientId", client.ID).Msg("Received track from client")
+		h.log.Info().
+			Str("clientId", client.ID).
+			Str("trackId", remoteTrack.ID()).
+			Str("codec", remoteTrack.Codec().MimeType).
+			Msg("Received track from client")
 
 		localTrack, err := webrtc.NewTrackLocalStaticRTP(
 			remoteTrack.Codec().RTPCodecCapability,
@@ -361,6 +403,7 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 			remoteTrack.StreamID(),
 		)
 		if err != nil {
+			h.log.Error().Err(err).Msg("Failed to create local track")
 			return
 		}
 
@@ -369,14 +412,20 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		h.trackOwners[localTrack.ID()] = client.ID
 		h.mu.Unlock()
 
+		// Пересылаем трек всем остальным
 		for _, otherClient := range h.getClientsInRoom(client.Room.ID) {
 			if otherClient.ID != client.ID && otherClient.PeerConn != nil {
 				if _, err := otherClient.PeerConn.AddTrack(localTrack); err == nil {
+					h.log.Info().
+						Str("fromUser", client.User.ID).
+						Str("toUser", otherClient.User.ID).
+						Msg("Forwarding track")
 					go h.renegotiateClient(otherClient)
 				}
 			}
 		}
 
+		// Копируем RTP пакеты
 		go func() {
 			defer func() {
 				h.mu.Lock()
@@ -389,7 +438,9 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 				if err != nil {
 					return
 				}
-				localTrack.WriteRTP(packet)
+				if err := localTrack.WriteRTP(packet); err != nil {
+					return
+				}
 			}
 		}()
 	})
@@ -407,10 +458,12 @@ func (h *Hub) renegotiateClient(client *Client) {
 
 	offer, err := client.PeerConn.CreateOffer(nil)
 	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to create renegotiation offer")
 		return
 	}
 
 	if err := client.PeerConn.SetLocalDescription(offer); err != nil {
+		h.log.Error().Err(err).Msg("Failed to set local description for renegotiation")
 		return
 	}
 
