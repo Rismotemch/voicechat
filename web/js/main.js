@@ -84,7 +84,7 @@ async function joinRoom() {
     if (state.audioContext.state === 'suspended') {
         await state.audioContext.resume();
     }
-    
+
     const userName = elements.userName.value.trim();
     if (!userName) {
         alert('Пожалуйста, введите имя');
@@ -327,7 +327,7 @@ async function createPeerConnection() {
     const peerConnection = new RTCPeerConnection(rtcConfig);
     state.peerConnection = peerConnection;
 
-    // Добавляем трек микрофона
+    // 1. Добавляем треки микрофона
     if (state.localStream) {
         state.localStream.getTracks().forEach(track => {
             peerConnection.addTrack(track, state.localStream);
@@ -335,14 +335,14 @@ async function createPeerConnection() {
         });
     }
 
-    // Обработка удаленного аудио
+    // 2. Обработка входящего аудио
     peerConnection.ontrack = (event) => {
         console.log('Received remote track:', event.track.kind);
         const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
         createAudioElement(event.track, stream);
     };
 
-    // Отправка ICE кандидатов
+    // 3. Отправка Trickle ICE кандидатов
     peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
             console.log('Sending ICE candidate:', event.candidate.candidate);
@@ -361,14 +361,15 @@ async function createPeerConnection() {
     peerConnection.onconnectionstatechange = () => {
         console.log('Connection state changed:', peerConnection.connectionState);
         if (peerConnection.connectionState === 'connected') {
-            console.log('🎉 WebRTC connection successfully established!');
+            console.log('🎉 WebRTC connected!');
         }
     };
 
     peerConnection.oniceconnectionstatechange = () => {
-        console.log('ICE state changed:', peerConnection.iceConnectionState);
+        console.log('ICE connection state changed:', peerConnection.iceConnectionState);
     };
 
+    // 4. Создаем Offer и ждем сбор всех ICE кандидатов (включая STUN srflx)
     try {
         const offer = await peerConnection.createOffer({
             offerToReceiveAudio: true,
@@ -376,12 +377,27 @@ async function createPeerConnection() {
         });
         await peerConnection.setLocalDescription(offer);
 
-        // Отправляем offer на сервер
+        // Ждем сбор STUN кандидатов (максимум 800мс)
+        await new Promise((resolve) => {
+            if (peerConnection.iceGatheringState === 'complete') {
+                resolve();
+            } else {
+                const checkState = () => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                        resolve();
+                    }
+                };
+                peerConnection.addEventListener('icegatheringstatechange', checkState);
+                setTimeout(resolve, 800); // Таймаут на случай медленного STUN
+            }
+        });
+
+        console.log('Sending gathered SDP offer');
         sendWebSocketMessage('sdp_offer', {
             userId: state.user.id,
             offer: peerConnection.localDescription
         });
-        console.log('Sent local SDP offer');
     } catch (error) {
         console.error('Failed to create offer:', error);
     }
