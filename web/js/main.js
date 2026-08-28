@@ -28,8 +28,8 @@ const rtcConfig = {
                 'turn:voice.repozis.ru:3478',
                 'turn:voice.repozis.ru:3478?transport=tcp'
             ],
-            username: 'test',
-            credential: 'test123'
+            username: 'voicechat',
+            credential: 'voicechat123'
         }
     ],
     iceCandidatePoolSize: 10,

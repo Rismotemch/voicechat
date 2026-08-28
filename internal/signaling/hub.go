@@ -483,8 +483,8 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	if len(h.cfg.TURNServers) > 0 {
 		iceServers = append(iceServers, webrtc.ICEServer{
 			URLs:       h.cfg.TURNServers,
-			Username:   "openrelayproject",
-			Credential: "openrelayproject",
+			Username:   "voicechat",
+			Credential: "voicechat123",
 		})
 	}
 
