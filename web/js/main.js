@@ -9,13 +9,15 @@ const state = {
     isJoined: false,
     isMuted: false,
     reconnectAttempts: 0,
-    maxReconnectAttempts: 3
+    maxReconnectAttempts: 3,
+    pendingCandidates: [] // Буфер для кандидатов от сервера
 };
 
 const rtcConfig = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:voice.repozis.ru:3478' },
         {
             urls: [
                 'turn:voice.repozis.ru:3478?transport=udp',
@@ -111,7 +113,7 @@ async function joinRoom() {
         console.log('Joined room as', userName);
     } catch (error) {
         console.error('Failed to join room:', error);
-        alert('Не удалось подключиться к микрофону или серверу.');
+        alert('Не удалось подключиться к микрофону.');
     }
 }
 
@@ -215,16 +217,29 @@ async function createPeerConnection() {
 
     if (state.peerConnection) {
         state.peerConnection.close();
-        state.peerConnection = null;
     }
 
+    state.pendingCandidates = [];
     const pc = new RTCPeerConnection(rtcConfig);
     state.peerConnection = pc;
 
-    // 1. Привязываем обработчик кандидатов ДО отправки Offer
+    // Сразу добавляем локальный микрофон
+    if (state.localStream) {
+        state.localStream.getTracks().forEach(track => {
+            pc.addTrack(track, state.localStream);
+        });
+    }
+
+    // Обработка удаленных аудио-треков
+    pc.ontrack = (event) => {
+        console.log('Received remote track:', event.track.id);
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        attachAudioStream(event.track.id, stream);
+    };
+
+    // Отправка локальных кандидатов
     pc.onicecandidate = (event) => {
         if (event.candidate) {
-            console.log('Generated local candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
                 candidate: {
@@ -237,28 +252,14 @@ async function createPeerConnection() {
         }
     };
 
-    // 2. Обработка входящих аудио потоков
-    pc.ontrack = (event) => {
-        console.log('Received remote track:', event.track.id);
-        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        attachAudioStream(event.track.id, stream);
-    };
-
     pc.onconnectionstatechange = () => {
         console.log('PeerConnection state:', pc.connectionState);
         if (pc.connectionState === 'connected') {
-            console.log('WebRTC connection established!');
+            console.log('🎉 WebRTC connection successfully established!');
         }
     };
 
-    // 3. Добавляем микрофон
-    if (state.localStream) {
-        state.localStream.getTracks().forEach(track => {
-            pc.addTrack(track, state.localStream);
-        });
-    }
-
-    // 4. Формируем Offer
+    // Создаем Offer и сразу отправляем
     try {
         const offer = await pc.createOffer({
             offerToReceiveAudio: true,
@@ -275,12 +276,15 @@ async function createPeerConnection() {
     }
 }
 
+// Обработка SDP Offer от сервера (при появлении новых треков)
 async function handleSDPOffer(payload) {
     console.log('Received SDP offer for renegotiation');
     if (!state.peerConnection) return;
 
     try {
         await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.offer));
+        flushPendingCandidates();
+
         const answer = await state.peerConnection.createAnswer();
         await state.peerConnection.setLocalDescription(answer);
 
@@ -293,22 +297,46 @@ async function handleSDPOffer(payload) {
     }
 }
 
+// Обработка SDP Answer от сервера (ответ на наш первоначальный Offer)
 async function handleSDPAnswer(payload) {
+    console.log('Received SDP answer from server');
     if (!state.peerConnection) return;
+
     try {
         await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
-        console.log('Remote SDP Answer set successfully');
+        flushPendingCandidates();
     } catch (error) {
         console.error('Failed to set remote description:', error);
     }
 }
 
+// Обработка входящих кандидатов от сервера
 async function handleICECandidate(payload) {
-    if (!state.peerConnection || !payload.candidate) return;
+    if (!payload.candidate) return;
+
+    if (!state.peerConnection || !state.peerConnection.remoteDescription) {
+        state.pendingCandidates.push(payload.candidate);
+        return;
+    }
+
     try {
         await state.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
     } catch (error) {
         console.error('Failed to add remote ICE candidate:', error);
+    }
+}
+
+async function flushPendingCandidates() {
+    if (state.pendingCandidates.length > 0) {
+        for (const candidate of state.pendingCandidates) {
+            try {
+                await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (e) {
+                console.error('Failed to flush candidate:', e);
+            }
+        }
+        state.pendingCandidates = [];
+        console.log('Flushed pending ICE candidates');
     }
 }
 
@@ -321,8 +349,14 @@ function attachAudioStream(trackId, stream) {
         audio.playsInline = true;
         document.body.appendChild(audio);
     }
-    audio.srcObject = stream;
-    audio.play().catch(e => console.warn('Autoplay prevented:', e));
+    
+    if (audio.srcObject !== stream) {
+        audio.srcObject = stream;
+    }
+    
+    audio.play().catch(e => {
+        console.warn('Autoplay prevented, requires user interaction:', e);
+    });
 }
 
 function sendWebSocketMessage(type, payload) {
@@ -366,7 +400,7 @@ function addParticipantToUI(user, isSelf = false) {
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.style.background = user.avatarColor || '#7c6cff';
+    avatar.style.background = user.avatarColor || generateRandomColor();
     avatar.textContent = (user.name || 'U').charAt(0).toUpperCase();
 
     const name = document.createElement('div');
