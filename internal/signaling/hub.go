@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
-	"github.com/rs/zerolog"
 	"github.com/rismotemch/voicechat/internal/config"
 	"github.com/rismotemch/voicechat/internal/models"
+	"github.com/rs/zerolog"
 )
 
 var upgrader = websocket.Upgrader{
@@ -64,7 +64,7 @@ type SDPAnswerMessage struct {
 }
 
 type ICECandidateMessage struct {
-	UserID    string                   `json:"userId"`
+	UserID    string                  `json:"userId"`
 	Candidate webrtc.ICECandidateInit `json:"candidate"`
 }
 
@@ -499,22 +499,11 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	}
 
 	// Логирование всех ICE кандидатов
-peerConn.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
-    h.log.Info().
-        Str("clientId", client.ID).
-        Str("gatheringState", state.String()).
-        Msg("ICE gathering state changed")
-})
-
-	// Логирование выбранной пары кандидатов
-	peerConn.OnICECandidatePairChange(func(pair *webrtc.ICECandidatePair) {
-   	if pair != nil {
-        h.log.Info().
-            Str("clientId", client.ID).
-            Str("localCandidate", pair.Local.String()).
-            Str("remoteCandidate", pair.Remote.String()).
-            Msg("ICE candidate pair selected")
-    	}
+	peerConn.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+		h.log.Info().
+			Str("clientId", client.ID).
+			Str("gatheringState", state.String()).
+			Msg("ICE gathering state changed")
 	})
 
 	// Обработка ICE кандидатов
