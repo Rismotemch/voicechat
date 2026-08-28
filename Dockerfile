@@ -35,7 +35,7 @@ COPY web /app/web
 
 # Expose ports
 EXPOSE 8080
-EXPOSE 50000-50100/udp
+EXPOSE 50000-51000/udp
 
 # Set environment variables
 ENV PORT=8080
