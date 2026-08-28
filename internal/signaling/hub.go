@@ -8,40 +8,36 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v3"
 	"github.com/rismotemch/voicechat/internal/config"
 	"github.com/rismotemch/voicechat/internal/models"
 	"github.com/rs/zerolog"
 )
 
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  4096,
+	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
 }
 
 type Client struct {
-	ID                string
-	User              *models.User
-	Room              *models.Room
-	Conn              *websocket.Conn
-	Send              chan []byte
-	Hub               *Hub
-	PeerConn          *webrtc.PeerConnection
-	pendingCandidates []webrtc.ICECandidateInit
-	mu                sync.RWMutex
+	ID      string
+	User    *models.User
+	Room    *models.Room
+	Conn    *websocket.Conn
+	Send    chan []byte
+	Hub     *Hub
+	IsMuted bool
+	mu      sync.RWMutex
 }
 
 type Hub struct {
-	cfg          *config.Config
-	log          zerolog.Logger
-	rooms        map[string]*models.Room
-	clients      map[string]*Client
-	activeTracks map[string]*webrtc.TrackLocalStaticRTP
-	trackOwners  map[string]string
-	mu           sync.RWMutex
+	cfg     *config.Config
+	log     zerolog.Logger
+	rooms   map[string]*models.Room
+	clients map[string]*Client
+	mu      sync.RWMutex
 }
 
 type Message struct {
@@ -53,21 +49,6 @@ type JoinMessage struct {
 	UserID      string `json:"userId"`
 	UserName    string `json:"userName"`
 	AvatarColor string `json:"avatarColor"`
-}
-
-type SDPOfferMessage struct {
-	UserID string                    `json:"userId"`
-	Offer  webrtc.SessionDescription `json:"offer"`
-}
-
-type SDPAnswerMessage struct {
-	UserID string                    `json:"userId"`
-	Answer webrtc.SessionDescription `json:"answer"`
-}
-
-type ICECandidateMessage struct {
-	UserID    string                  `json:"userId"`
-	Candidate webrtc.ICECandidateInit `json:"candidate"`
 }
 
 type UserJoinedMessage struct {
@@ -86,20 +67,25 @@ type ErrorMessage struct {
 	Message string `json:"message"`
 }
 
+type MuteMessage struct {
+	IsMuted bool `json:"isMuted"`
+}
+
 func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 	hub := &Hub{
-		cfg:          cfg,
-		log:          log,
-		rooms:        make(map[string]*models.Room),
-		clients:      make(map[string]*Client),
-		activeTracks: make(map[string]*webrtc.TrackLocalStaticRTP),
-		trackOwners:  make(map[string]string),
+		cfg:     cfg,
+		log:     log,
+		rooms:   make(map[string]*models.Room),
+		clients: make(map[string]*Client),
 	}
 
 	room := models.NewRoom(cfg.RoomName, cfg.MaxUsers)
 	hub.rooms[cfg.RoomName] = room
 
-	log.Info().Str("room", cfg.RoomName).Int("maxUsers", cfg.MaxUsers).Msg("Created default room")
+	log.Info().
+		Str("room", cfg.RoomName).
+		Int("maxUsers", cfg.MaxUsers).
+		Msg("Created default room")
 
 	return hub
 }
@@ -114,11 +100,10 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.log.Info().Msg("New WebSocket connection established")
 
 	client := &Client{
-		ID:                "client_" + uuid.New().String(),
-		Conn:              conn,
-		Send:              make(chan []byte, 256),
-		Hub:               h,
-		pendingCandidates: make([]webrtc.ICECandidateInit, 0),
+		ID:   "client_" + uuid.New().String(),
+		Conn: conn,
+		Send: make(chan []byte, 1024),
+		Hub:  h,
 	}
 
 	h.mu.Lock()
@@ -135,7 +120,7 @@ func (c *Client) readPump() {
 		c.Conn.Close()
 	}()
 
-	c.Conn.SetReadLimit(512 * 1024)
+	c.Conn.SetReadLimit(1024 * 1024) // 1MB max message size
 	c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	c.Conn.SetPongHandler(func(string) error {
 		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -143,11 +128,21 @@ func (c *Client) readPump() {
 	})
 
 	for {
-		_, message, err := c.Conn.ReadMessage()
+		messageType, message, err := c.Conn.ReadMessage()
 		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				c.Hub.log.Debug().Err(err).Msg("WebSocket read error")
+			}
 			break
 		}
-		c.handleMessage(message)
+
+		if messageType == websocket.BinaryMessage {
+			// Бинарные аудио данные
+			c.handleAudioData(message)
+		} else if messageType == websocket.TextMessage {
+			// JSON сообщение
+			c.handleMessage(message)
+		}
 	}
 }
 
@@ -166,10 +161,20 @@ func (c *Client) writePump() {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			c.Conn.WriteMessage(websocket.TextMessage, message)
+
+			// Определяем тип сообщения
+			if len(message) > 0 && message[0] == '{' {
+				// JSON сообщение
+				c.Conn.WriteMessage(websocket.TextMessage, message)
+			} else {
+				// Бинарные аудио данные
+				c.Conn.WriteMessage(websocket.BinaryMessage, message)
+			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			c.Conn.WriteMessage(websocket.PingMessage, nil)
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -177,34 +182,38 @@ func (c *Client) writePump() {
 func (c *Client) handleMessage(data []byte) {
 	var msg Message
 	if err := json.Unmarshal(data, &msg); err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to unmarshal message")
 		return
 	}
 
 	switch msg.Type {
 	case "join":
 		var joinMsg JoinMessage
-		if err := json.Unmarshal(msg.Payload, &joinMsg); err == nil {
-			c.handleJoin(joinMsg)
+		if err := json.Unmarshal(msg.Payload, &joinMsg); err != nil {
+			c.Hub.log.Error().Err(err).Msg("Failed to unmarshal join message")
+			return
 		}
-	case "sdp_offer":
-		var offerMsg SDPOfferMessage
-		if err := json.Unmarshal(msg.Payload, &offerMsg); err == nil {
-			c.handleSDPOffer(offerMsg)
+		c.handleJoin(joinMsg)
+
+	case "mute":
+		var muteMsg MuteMessage
+		if err := json.Unmarshal(msg.Payload, &muteMsg); err != nil {
+			c.Hub.log.Error().Err(err).Msg("Failed to unmarshal mute message")
+			return
 		}
-	case "sdp_answer":
-		var answerMsg SDPAnswerMessage
-		if err := json.Unmarshal(msg.Payload, &answerMsg); err == nil {
-			c.handleSDPAnswer(answerMsg)
-		}
-	case "ice_candidate":
-		var iceMsg ICECandidateMessage
-		if err := json.Unmarshal(msg.Payload, &iceMsg); err == nil {
-			c.handleICECandidate(iceMsg)
-		}
+		c.handleMute(muteMsg)
+
+	default:
+		c.Hub.log.Debug().Str("type", msg.Type).Msg("Unknown message type")
 	}
 }
 
 func (c *Client) handleJoin(msg JoinMessage) {
+	c.Hub.log.Info().
+		Str("userId", msg.UserID).
+		Str("userName", msg.UserName).
+		Msg("User joining room")
+
 	user := &models.User{
 		ID:          msg.UserID,
 		Name:        msg.UserName,
@@ -213,256 +222,81 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	}
 
 	room := c.Hub.getRoom()
-	if room == nil || room.AddUser(user) != nil {
-		c.sendMessage("error", ErrorMessage{Message: "Room full or unavailable"})
+	if room == nil {
+		c.sendError("Room not found")
+		return
+	}
+
+	if err := room.AddUser(user); err != nil {
+		c.sendError("Room is full")
 		return
 	}
 
 	c.User = user
 	c.Room = room
 
-	c.Hub.log.Info().Str("userId", user.ID).Str("userName", user.Name).Msg("User joined room")
+	// Отправляем текущее состояние комнаты
+	roomState := RoomStateMessage{
+		Users: room.GetUsers(),
+	}
+	c.sendJSON("room_state", roomState)
 
-	c.sendMessage("room_state", RoomStateMessage{Users: room.GetUsers()})
-
+	// Уведомляем других
 	for _, client := range c.Hub.getClientsInRoom(room.ID) {
 		if client.ID != c.ID {
-			client.sendMessage("user_joined", UserJoinedMessage{User: user})
+			client.sendJSON("user_joined", UserJoinedMessage{User: user})
 		}
 	}
+
+	c.Hub.log.Info().
+		Str("userId", user.ID).
+		Str("room", room.Name).
+		Int("totalUsers", room.Count()).
+		Msg("User joined room")
 }
 
-func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
-	c.Hub.log.Info().Str("userId", msg.UserID).Msg("Received SDP offer")
-
-	if c.PeerConn != nil {
-		c.PeerConn.Close()
-	}
-
-	peerConn, err := c.Hub.createPeerConnection(c)
-	if err != nil {
-		c.Hub.log.Error().Err(err).Msg("Failed to create PeerConnection")
-		c.sendMessage("error", ErrorMessage{Message: "Failed to create PeerConnection"})
-		return
-	}
-
+func (c *Client) handleMute(msg MuteMessage) {
 	c.mu.Lock()
-	c.PeerConn = peerConn
+	c.IsMuted = msg.IsMuted
 	c.mu.Unlock()
 
-	// Добавляем все существующие треки
-	c.Hub.mu.RLock()
-	for trackID, track := range c.Hub.activeTracks {
-		ownerID := c.Hub.trackOwners[trackID]
-		if ownerID != c.ID {
-			if _, err := c.PeerConn.AddTrack(track); err != nil {
-				c.Hub.log.Error().Err(err).Str("trackId", trackID).Msg("Failed to add existing track")
-			}
-		}
-	}
-	c.Hub.mu.RUnlock()
-
-	if err := peerConn.SetRemoteDescription(msg.Offer); err != nil {
-		c.Hub.log.Error().Err(err).Msg("Failed to set remote description")
-		return
-	}
-
-	answer, err := peerConn.CreateAnswer(nil)
-	if err != nil {
-		c.Hub.log.Error().Err(err).Msg("Failed to create answer")
-		return
-	}
-
-	if err := peerConn.SetLocalDescription(answer); err != nil {
-		c.Hub.log.Error().Err(err).Msg("Failed to set local description")
-		return
-	}
-
-	// Добавляем отложенные ICE кандидаты
-	c.mu.Lock()
-	for _, cand := range c.pendingCandidates {
-		peerConn.AddICECandidate(cand)
-	}
-	c.pendingCandidates = nil
-	c.mu.Unlock()
-
-	c.sendMessage("sdp_answer", SDPAnswerMessage{
-		UserID: msg.UserID,
-		Answer: answer,
-	})
+	c.Hub.log.Debug().
+		Str("userId", c.User.ID).
+		Bool("isMuted", msg.IsMuted).
+		Msg("User mute state changed")
 }
 
-func (c *Client) handleSDPAnswer(msg SDPAnswerMessage) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Client) handleAudioData(audioData []byte) {
+	if c.User == nil || c.Room == nil {
+		return
+	}
 
-	if c.PeerConn != nil {
-		if err := c.PeerConn.SetRemoteDescription(msg.Answer); err != nil {
-			c.Hub.log.Error().Err(err).Msg("Failed to set remote description from answer")
+	c.mu.RLock()
+	isMuted := c.IsMuted
+	c.mu.RUnlock()
+
+	if isMuted {
+		return
+	}
+
+	// Пересылаем аудио всем остальным клиентам в комнате
+	for _, client := range c.Hub.getClientsInRoom(c.Room.ID) {
+		if client.ID == c.ID {
+			continue
+		}
+
+		select {
+		case client.Send <- audioData:
+		default:
+			// Буфер полон, пропускаем пакет
 		}
 	}
 }
 
-func (c *Client) handleICECandidate(msg ICECandidateMessage) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.PeerConn == nil || c.PeerConn.RemoteDescription() == nil {
-		c.pendingCandidates = append(c.pendingCandidates, msg.Candidate)
-		return
-	}
-
-	if err := c.PeerConn.AddICECandidate(msg.Candidate); err != nil {
-		c.Hub.log.Error().Err(err).Msg("Failed to add ICE candidate")
-	}
-}
-
-func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, error) {
-	settingEngine := webrtc.SettingEngine{}
-
-	if h.cfg.UDPMin > 0 && h.cfg.UDPMax > 0 {
-		if err := settingEngine.SetEphemeralUDPPortRange(uint16(h.cfg.UDPMin), uint16(h.cfg.UDPMax)); err != nil {
-			h.log.Error().Err(err).Msg("Failed to set UDP port range")
-		}
-	}
-
-	// НЕ используем NAT 1-to-1, так как у нас TURN
-	// Вместо этого полагаемся на TURN для relay
-
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
-
-	// Настраиваем ICE серверы
-	var iceServers []webrtc.ICEServer
-
-	// Добавляем STUN
-	if len(h.cfg.STUNServers) > 0 {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs: h.cfg.STUNServers,
-		})
-	}
-
-	// Добавляем TURN
-	if len(h.cfg.TURNServers) > 0 {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:       h.cfg.TURNServers,
-			Username:   "voicechat",
-			Credential: "voicechat123",
-		})
-	}
-
-	config := webrtc.Configuration{
-		ICEServers: iceServers,
-	}
-
-	peerConn, err := api.NewPeerConnection(config)
-	if err != nil {
-		return nil, err
-	}
-
-	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		h.log.Info().Str("clientId", client.ID).Str("state", state.String()).Msg("PeerConnection state")
-	})
-
-	peerConn.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		h.log.Info().Str("clientId", client.ID).Str("state", state.String()).Msg("ICE connection state")
-	})
-
-	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate != nil {
-			h.log.Info().Str("candidate", candidate.String()).Msg("Generated ICE candidate")
-			client.sendMessage("ice_candidate", ICECandidateMessage{
-				UserID:    client.User.ID,
-				Candidate: candidate.ToJSON(),
-			})
-		}
-	})
-
-	peerConn.OnTrack(func(remoteTrack *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		h.log.Info().
-			Str("clientId", client.ID).
-			Str("trackId", remoteTrack.ID()).
-			Str("codec", remoteTrack.Codec().MimeType).
-			Msg("Received track from client")
-
-		localTrack, err := webrtc.NewTrackLocalStaticRTP(
-			remoteTrack.Codec().RTPCodecCapability,
-			remoteTrack.ID(),
-			remoteTrack.StreamID(),
-		)
-		if err != nil {
-			h.log.Error().Err(err).Msg("Failed to create local track")
-			return
-		}
-
-		h.mu.Lock()
-		h.activeTracks[localTrack.ID()] = localTrack
-		h.trackOwners[localTrack.ID()] = client.ID
-		h.mu.Unlock()
-
-		// Пересылаем трек всем остальным
-		for _, otherClient := range h.getClientsInRoom(client.Room.ID) {
-			if otherClient.ID != client.ID && otherClient.PeerConn != nil {
-				if _, err := otherClient.PeerConn.AddTrack(localTrack); err == nil {
-					h.log.Info().
-						Str("fromUser", client.User.ID).
-						Str("toUser", otherClient.User.ID).
-						Msg("Forwarding track")
-					go h.renegotiateClient(otherClient)
-				}
-			}
-		}
-
-		// Копируем RTP пакеты
-		go func() {
-			defer func() {
-				h.mu.Lock()
-				delete(h.activeTracks, localTrack.ID())
-				delete(h.trackOwners, localTrack.ID())
-				h.mu.Unlock()
-			}()
-			for {
-				packet, _, err := remoteTrack.ReadRTP()
-				if err != nil {
-					return
-				}
-				if err := localTrack.WriteRTP(packet); err != nil {
-					return
-				}
-			}
-		}()
-	})
-
-	return peerConn, nil
-}
-
-func (h *Hub) renegotiateClient(client *Client) {
-	client.mu.Lock()
-	defer client.mu.Unlock()
-
-	if client.PeerConn == nil || client.PeerConn.SignalingState() != webrtc.SignalingStateStable {
-		return
-	}
-
-	offer, err := client.PeerConn.CreateOffer(nil)
-	if err != nil {
-		h.log.Error().Err(err).Msg("Failed to create renegotiation offer")
-		return
-	}
-
-	if err := client.PeerConn.SetLocalDescription(offer); err != nil {
-		h.log.Error().Err(err).Msg("Failed to set local description for renegotiation")
-		return
-	}
-
-	client.sendMessage("sdp_offer", SDPOfferMessage{
-		UserID: client.User.ID,
-		Offer:  offer,
-	})
-}
-
-func (c *Client) sendMessage(msgType string, payload interface{}) {
+func (c *Client) sendJSON(msgType string, payload interface{}) {
 	data, err := json.Marshal(payload)
 	if err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to marshal payload")
 		return
 	}
 
@@ -471,11 +305,21 @@ func (c *Client) sendMessage(msgType string, payload interface{}) {
 		Payload: data,
 	}
 
-	msgData, _ := json.Marshal(msg)
+	msgData, err := json.Marshal(msg)
+	if err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to marshal message")
+		return
+	}
+
 	select {
 	case c.Send <- msgData:
 	default:
+		c.Hub.log.Warn().Msg("Client send channel is full")
 	}
+}
+
+func (c *Client) sendError(message string) {
+	c.sendJSON("error", ErrorMessage{Message: message})
 }
 
 func (h *Hub) getRoom() *models.Room {
@@ -498,28 +342,26 @@ func (h *Hub) getClientsInRoom(roomID string) []*Client {
 }
 
 func (h *Hub) removeClient(client *Client) {
-	h.log.Info().Str("clientId", client.ID).Msg("Client disconnected")
+	h.log.Info().
+		Str("clientId", client.ID).
+		Msg("Client disconnected")
 
 	h.mu.Lock()
 	delete(h.clients, client.ID)
-
-	for trackID, ownerID := range h.trackOwners {
-		if ownerID == client.ID {
-			delete(h.activeTracks, trackID)
-			delete(h.trackOwners, trackID)
-		}
-	}
 	h.mu.Unlock()
 
 	if client.Room != nil && client.User != nil {
 		client.Room.RemoveUser(client.User.ID)
-		for _, c := range h.getClientsInRoom(client.Room.ID) {
-			c.sendMessage("user_left", UserLeftMessage{UserID: client.User.ID})
-		}
-	}
 
-	if client.PeerConn != nil {
-		client.PeerConn.Close()
+		for _, c := range h.getClientsInRoom(client.Room.ID) {
+			c.sendJSON("user_left", UserLeftMessage{UserID: client.User.ID})
+		}
+
+		h.log.Info().
+			Str("userId", client.User.ID).
+			Str("room", client.Room.Name).
+			Int("totalUsers", client.Room.Count()).
+			Msg("User left room")
 	}
 }
 
@@ -538,9 +380,6 @@ func (h *Hub) Close() {
 	defer h.mu.RUnlock()
 
 	for _, client := range h.clients {
-		if client.PeerConn != nil {
-			client.PeerConn.Close()
-		}
 		client.Conn.Close()
 	}
 }
