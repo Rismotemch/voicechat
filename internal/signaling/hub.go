@@ -372,7 +372,13 @@ func (c *Client) handleSDPAnswer(msg SDPAnswerMessage) {
 }
 
 func (c *Client) handleICECandidate(msg ICECandidateMessage) {
+	c.Hub.log.Debug().
+		Str("clientId", c.ID).
+		Str("candidate", msg.Candidate.Candidate).
+		Msg("Received ICE candidate from client")
+
 	if c.PeerConn == nil {
+		c.Hub.log.Warn().Str("clientId", c.ID).Msg("PeerConn is nil, dropping candidate")
 		return
 	}
 

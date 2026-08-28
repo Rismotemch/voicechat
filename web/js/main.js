@@ -350,7 +350,13 @@ async function createPeerConnection() {
             console.log('Sending ICE candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
-                candidate: event.candidate
+                // Явно вызываем toJSON(), чтобы поля sdpMid и sdpMLineIndex не терялись
+                candidate: event.candidate.toJSON ? event.candidate.toJSON() : {
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex,
+                    usernameFragment: event.candidate.usernameFragment
+                }
             });
         } else {
             console.log('ICE gathering completed');
