@@ -240,20 +240,28 @@ function handleUserLeft(payload) {
 async function handleSDPAnswer(payload) {
     console.log('SDP answer received');
     
-    if (state.peerConnection) {
-        try {
-            await state.peerConnection.setRemoteDescription(payload.answer);
-            console.log('Remote description set successfully');
-        } catch (error) {
-            console.error('Failed to set remote description:', error);
-        }
+    if (!state.peerConnection) {
+        console.warn('No PeerConnection available for SDP answer');
+        return;
+    }
+    
+    try {
+        await state.peerConnection.setRemoteDescription(payload.answer);
+        console.log('Remote description set successfully');
+    } catch (error) {
+        console.error('Failed to set remote description:', error);
     }
 }
 
 async function handleICECandidate(payload) {
-    console.log('ICE candidate received');
+    console.log('ICE candidate received:', payload.candidate);
     
-    if (state.peerConnection && payload.candidate) {
+    if (!state.peerConnection) {
+        console.warn('No PeerConnection available for ICE candidate');
+        return;
+    }
+    
+    if (payload.candidate) {
         try {
             await state.peerConnection.addIceCandidate(payload.candidate);
             console.log('ICE candidate added successfully');
@@ -265,54 +273,40 @@ async function handleICECandidate(payload) {
 
 async function createPeerConnection() {
     console.log('Creating PeerConnection');
-
-    // Логирование состояния ICE
-    state.peerConnection.oniceconnectionstatechange = () => {
-	console.log('ICE connection state:', state.peerConnection.iceConnectionState);
-    };
-
-    state.peerConnection.onicegatheringstatechange = () => {
-	console.log('ICE gathering state:', state.peerConnection.iceGatheringState);
-    };
-
-    state.peerConnection.onsignalingstatechange = () => {
-	console.log('Signaling state:', state.peerConnection.signalingState);
-    };
     
     // Закрываем старое соединение если есть
     if (state.peerConnection) {
         state.peerConnection.close();
+        state.peerConnection = null;
     }
     
     // Создаём новое RTCPeerConnection
-    state.peerConnection = new RTCPeerConnection(rtcConfig);
+    const peerConnection = new RTCPeerConnection(rtcConfig);
+    state.peerConnection = peerConnection;
     
     // Добавляем локальный поток
     state.localStream.getTracks().forEach(track => {
-        state.peerConnection.addTrack(track, state.localStream);
+        peerConnection.addTrack(track, state.localStream);
         console.log('Added local track:', track.kind);
     });
     
     // Обработка входящих треков
-    state.peerConnection.ontrack = (event) => {
+    peerConnection.ontrack = (event) => {
         console.log('Received remote track:', event.track.kind);
         console.log('Streams:', event.streams);
         
         if (event.track.kind === 'audio') {
             const remoteStream = event.streams[0];
             if (remoteStream) {
-                // Определяем, от кого пришёл трек
-                // В SFU трек может прийти от любого пользователя
-                // Нужно сопоставить stream ID с пользователем
                 createAudioElement(event.track, remoteStream);
             }
         }
     };
     
     // Обработка ICE кандидатов
-    state.peerConnection.onicecandidate = (event) => {
+    peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
-            console.log('Sending ICE candidate');
+            console.log('Sending ICE candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
                 candidate: event.candidate
@@ -321,14 +315,29 @@ async function createPeerConnection() {
     };
     
     // Логирование состояния соединения
-    state.peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', state.peerConnection.connectionState);
+    peerConnection.onconnectionstatechange = () => {
+        console.log('Connection state:', peerConnection.connectionState);
+    };
+    
+    // Логирование состояния ICE
+    peerConnection.oniceconnectionstatechange = () => {
+        console.log('ICE connection state:', peerConnection.iceConnectionState);
+    };
+    
+    // Логирование состояния ICE gathering
+    peerConnection.onicegatheringstatechange = () => {
+        console.log('ICE gathering state:', peerConnection.iceGatheringState);
+    };
+    
+    // Логирование signaling state
+    peerConnection.onsignalingstatechange = () => {
+        console.log('Signaling state:', peerConnection.signalingState);
     };
     
     // Создаём offer
     try {
-        const offer = await state.peerConnection.createOffer();
-        await state.peerConnection.setLocalDescription(offer);
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
         console.log('Sending SDP offer');
         
         sendWebSocketMessage('sdp_offer', {
