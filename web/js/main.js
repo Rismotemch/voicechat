@@ -19,14 +19,25 @@ const rtcConfig = {
     iceServers: [
         {
             urls: [
-                'turn:voice.repozis.ru:3478?transport=udp',
-                'turn:voice.repozis.ru:3478?transport=tcp'
-            ],
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302'
+            ]
+        },
+        {
+            urls: 'turn:voice.repozis.ru:3478?transport=udp',
+            username: 'voicechat',
+            credential: 'voicechat123'
+        },
+        {
+            urls: 'turn:voice.repozis.ru:3478?transport=tcp',
             username: 'voicechat',
             credential: 'voicechat123'
         }
     ],
-    iceTransportPolicy: 'relay' // <--- ЭТО ПРИНУДИТЕЛЬНО ВКЛЮЧИТ TURN
+    iceCandidatePoolSize: 10,
+    iceTransportPolicy: 'all',
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
 };
 
 // DOM элементы
@@ -251,10 +262,9 @@ async function handleSDPOffer(payload) {
     }
 
     try {
-        await state.peerConnection.setRemoteDescription(payload.offer);
+        await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.offer));
         console.log('Remote description set for renegotiation');
 
-        // Создаём answer
         const answer = await state.peerConnection.createAnswer();
         await state.peerConnection.setLocalDescription(answer);
         console.log('Sending SDP answer for renegotiation');
@@ -305,46 +315,43 @@ async function handleICECandidate(payload) {
 async function createPeerConnection() {
     console.log('Creating PeerConnection');
 
-    // Закрываем старое соединение если есть
     if (state.peerConnection) {
         state.peerConnection.close();
         state.peerConnection = null;
     }
 
-    // Очищаем отложенные кандидаты
-    state.pendingCandidates = [];
-
-    // Создаём новое RTCPeerConnection
     const peerConnection = new RTCPeerConnection(rtcConfig);
     state.peerConnection = peerConnection;
 
-    // Добавляем локальный поток
-    state.localStream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, state.localStream);
-        console.log('Added local track:', track.kind);
-    });
+    // 1. Привязываем микрофонный трек явно через Transceiver (критично для Safari/iOS)
+    if (state.localStream) {
+        state.localStream.getTracks().forEach(track => {
+            peerConnection.addTransceiver(track, {
+                direction: 'sendrecv',
+                streams: [state.localStream]
+            });
+            console.log('Added local track to transceiver:', track.kind);
+        });
+    }
 
-    // Обработка входящих треков
+    // 2. Обработка входящего звука от других участников
     peerConnection.ontrack = (event) => {
         console.log('Received remote track:', event.track.kind);
-        console.log('Streams:', event.streams);
-
-        if (event.track.kind === 'audio') {
-            const remoteStream = event.streams[0];
-            if (remoteStream) {
-                createAudioElement(event.track, remoteStream);
-            }
+        if (event.streams && event.streams[0]) {
+            createAudioElement(event.track, event.streams[0]);
+        } else {
+            const inboundStream = new MediaStream([event.track]);
+            createAudioElement(event.track, inboundStream);
         }
     };
 
-    // Обработка ICE кандидатов
+    // 3. Передача кандидатов на сервер
     peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
             console.log('Sending ICE candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
-                // Явно вызываем toJSON(), чтобы поля sdpMid и sdpMLineIndex не терялись
-                candidate: event.candidate.toJSON ? event.candidate.toJSON() : {
+                candidate: {
                     candidate: event.candidate.candidate,
                     sdpMid: event.candidate.sdpMid,
                     sdpMLineIndex: event.candidate.sdpMLineIndex,
@@ -356,7 +363,6 @@ async function createPeerConnection() {
         }
     };
 
-    // Логирование состояния соединения
     peerConnection.onconnectionstatechange = () => {
         console.log('Connection state:', peerConnection.connectionState);
         if (peerConnection.connectionState === 'connected') {
@@ -364,25 +370,11 @@ async function createPeerConnection() {
         }
     };
 
-    // Логирование состояния ICE
     peerConnection.oniceconnectionstatechange = () => {
         console.log('ICE connection state:', peerConnection.iceConnectionState);
-        if (peerConnection.iceConnectionState === 'connected') {
-            console.log('ICE connection established!');
-        }
     };
 
-    // Логирование состояния ICE gathering
-    peerConnection.onicegatheringstatechange = () => {
-        console.log('ICE gathering state:', peerConnection.iceGatheringState);
-    };
-
-    // Логирование signaling state
-    peerConnection.onsignalingstatechange = () => {
-        console.log('Signaling state:', peerConnection.signalingState);
-    };
-
-    // Создаём offer
+    // 4. Формируем Offer
     try {
         const offer = await peerConnection.createOffer({
             offerToReceiveAudio: true,
