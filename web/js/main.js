@@ -19,12 +19,6 @@ const rtcConfig = {
     iceServers: [
         {
             urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302'
-            ]
-        },
-        {
-            urls: [
                 'turn:voice.repozis.ru:3478?transport=udp',
                 'turn:voice.repozis.ru:3478?transport=tcp'
             ],
@@ -32,9 +26,7 @@ const rtcConfig = {
             credential: 'voicechat123'
         }
     ],
-    iceCandidatePoolSize: 10,
-    // Временно для теста можно поставить 'relay', чтобы жестко проверить TURN:
-    // iceTransportPolicy: 'relay'
+    iceTransportPolicy: 'relay' // <--- ЭТО ПРИНУДИТЕЛЬНО ВКЛЮЧИТ TURN
 };
 
 // DOM элементы
