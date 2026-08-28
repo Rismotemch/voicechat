@@ -16,17 +16,7 @@ const state = {
 // WebRTC configuration
 const rtcConfig = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        {
-            urls: [
-                'turn:openrelay.metered.ca:80',
-                'turn:openrelay.metered.ca:443',
-                'turn:openrelay.metered.ca:443?transport=tcp'
-            ],
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
-        }
+        { urls: 'stun:stun.l.google.com:19302' }
     ]
 };
 
@@ -176,6 +166,10 @@ function handleWebSocketMessage(data) {
                 handleUserLeft(message.payload);
                 break;
                 
+            case 'sdp_offer':
+                handleSDPOffer(message.payload);
+                break;
+                
             case 'sdp_answer':
                 handleSDPAnswer(message.payload);
                 break;
@@ -234,6 +228,32 @@ function handleUserLeft(payload) {
         }
         participant.card.remove();
         state.participants.delete(payload.userId);
+    }
+}
+
+async function handleSDPOffer(payload) {
+    console.log('Received SDP offer for renegotiation');
+    
+    if (!state.peerConnection) {
+        console.warn('No PeerConnection available for SDP offer');
+        return;
+    }
+    
+    try {
+        await state.peerConnection.setRemoteDescription(payload.offer);
+        console.log('Remote description set for renegotiation');
+        
+        // Создаём answer
+        const answer = await state.peerConnection.createAnswer();
+        await state.peerConnection.setLocalDescription(answer);
+        console.log('Sending SDP answer for renegotiation');
+        
+        sendWebSocketMessage('sdp_answer', {
+            userId: state.user.id,
+            answer: answer
+        });
+    } catch (error) {
+        console.error('Failed to handle SDP offer:', error);
     }
 }
 

@@ -2,8 +2,8 @@ package signaling
 
 import (
 	"encoding/json"
-	"net/http"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -215,6 +215,14 @@ func (c *Client) handleMessage(data []byte) {
 		}
 		c.handleSDPOffer(offerMsg)
 
+	case "sdp_answer":
+		var answerMsg SDPAnswerMessage
+		if err := json.Unmarshal(msg.Payload, &answerMsg); err != nil {
+			c.sendError("Invalid SDP answer")
+			return
+		}
+		c.handleSDPAnswer(answerMsg)
+
 	case "ice_candidate":
 		var iceMsg ICECandidateMessage
 		if err := json.Unmarshal(msg.Payload, &iceMsg); err != nil {
@@ -323,6 +331,20 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		Answer: answer,
 	}
 	c.sendMessage("sdp_answer", answerMsg)
+}
+
+func (c *Client) handleSDPAnswer(msg SDPAnswerMessage) {
+	c.Hub.log.Debug().
+		Str("userId", msg.UserID).
+		Msg("Received SDP answer for renegotiation")
+
+	if c.PeerConn == nil {
+		return
+	}
+
+	if err := c.PeerConn.SetRemoteDescription(msg.Answer); err != nil {
+		c.Hub.log.Error().Err(err).Msg("Failed to set remote description from answer")
+	}
 }
 
 func (c *Client) handleICECandidate(msg ICECandidateMessage) {
@@ -539,6 +561,9 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 
 		// Проверяем, что у клиента есть PeerConnection
 		if client.PeerConn == nil {
+			h.log.Warn().
+				Str("clientId", client.ID).
+				Msg("Client has no PeerConnection, skipping")
 			continue
 		}
 
@@ -565,15 +590,28 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 			continue
 		}
 
-		// Запускаем пересылку пакетов в отдельной горутине
+		// Создаём и отправляем новый offer клиенту
 		go func(c *Client, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP) {
-			defer func() {
-				h.log.Debug().
-					Str("fromUser", sender.User.ID).
-					Str("toUser", c.User.ID).
-					Msg("Stopped forwarding track")
-			}()
+			// Создаём новый offer для клиента
+			offer, err := c.PeerConn.CreateOffer(nil)
+			if err != nil {
+				h.log.Error().Err(err).Msg("Failed to create offer for renegotiation")
+				return
+			}
 
+			if err := c.PeerConn.SetLocalDescription(offer); err != nil {
+				h.log.Error().Err(err).Msg("Failed to set local description")
+				return
+			}
+
+			// Отправляем offer клиенту
+			offerMsg := SDPOfferMessage{
+				UserID: c.User.ID,
+				Offer:  offer,
+			}
+			c.sendMessage("sdp_offer", offerMsg)
+
+			// Пересылаем RTP пакеты
 			for {
 				packet, _, err := remote.ReadRTP()
 				if err != nil {
