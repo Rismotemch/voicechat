@@ -24,14 +24,15 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	ID       string
-	User     *models.User
-	Room     *models.Room
-	Conn     *websocket.Conn
-	Send     chan []byte
-	Hub      *Hub
-	PeerConn *webrtc.PeerConnection
-	mu       sync.RWMutex
+	ID          string
+	User        *models.User
+	Room        *models.Room
+	Conn        *websocket.Conn
+	Send        chan []byte
+	Hub         *Hub
+	PeerConn    *webrtc.PeerConnection
+	localTracks map[string]*webrtc.TrackLocalStaticRTP
+	mu          sync.RWMutex
 }
 
 type Hub struct {
@@ -103,6 +104,28 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 	return hub
 }
 
+func (c *Client) addLocalTrack(trackID string, track *webrtc.TrackLocalStaticRTP) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.localTracks[trackID] = track
+}
+
+func (c *Client) removeLocalTrack(trackID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.localTracks, trackID)
+}
+
+func (c *Client) getLocalTracks() []*webrtc.TrackLocalStaticRTP {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	tracks := make([]*webrtc.TrackLocalStaticRTP, 0, len(c.localTracks))
+	for _, t := range c.localTracks {
+		tracks = append(tracks, t)
+	}
+	return tracks
+}
+
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.RequireAuth && h.cfg.AuthToken != "" {
 		token := r.URL.Query().Get("token")
@@ -122,10 +145,11 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.log.Info().Msg("New WebSocket connection established")
 
 	client := &Client{
-		ID:   generateID(),
-		Conn: conn,
-		Send: make(chan []byte, 256),
-		Hub:  h,
+		ID:          generateID(),
+		Conn:        conn,
+		Send:        make(chan []byte, 256),
+		Hub:         h,
+		localTracks: make(map[string]*webrtc.TrackLocalStaticRTP),
 	}
 
 	h.mu.Lock()
@@ -543,86 +567,107 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	return peerConn, nil
 }
 
+// forwardTrack вызывается при получении OnTrack от клиента
 func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 	h.log.Info().
 		Str("senderId", sender.ID).
 		Str("trackID", remoteTrack.ID()).
 		Msg("Starting track forwarding")
 
-	// Для каждого клиента в комнате
-	for _, client := range h.getClientsInRoom(sender.Room.ID) {
-		// Пропускаем отправителя
-		if client.ID == sender.ID {
-			continue
-		}
-
-		// Проверяем, что у клиента есть PeerConnection
-		if client.PeerConn == nil {
-			h.log.Warn().
-				Str("clientId", client.ID).
-				Msg("Client has no PeerConnection, skipping")
-			continue
-		}
-
-		h.log.Info().
-			Str("fromUser", sender.User.ID).
-			Str("toUser", client.User.ID).
-			Str("trackID", remoteTrack.ID()).
-			Msg("Forwarding track to client")
-
-		// Создаём локальный трек
-		localTrack, err := webrtc.NewTrackLocalStaticRTP(
-			remoteTrack.Codec().RTPCodecCapability,
-			remoteTrack.ID(),
-			remoteTrack.StreamID(),
-		)
-		if err != nil {
-			h.log.Error().Err(err).Msg("Failed to create local track")
-			continue
-		}
-
-		// Добавляем трек к PeerConnection клиента
-		if _, err := client.PeerConn.AddTrack(localTrack); err != nil {
-			h.log.Error().Err(err).Msg("Failed to add track to PeerConnection")
-			continue
-		}
-
-		// Создаём и отправляем новый offer клиенту
-		go func(c *Client, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP) {
-			// Создаём новый offer для клиента
-			offer, err := c.PeerConn.CreateOffer(nil)
-			if err != nil {
-				h.log.Error().Err(err).Msg("Failed to create offer for renegotiation")
-				return
-			}
-
-			if err := c.PeerConn.SetLocalDescription(offer); err != nil {
-				h.log.Error().Err(err).Msg("Failed to set local description")
-				return
-			}
-
-			// Отправляем offer клиенту
-			offerMsg := SDPOfferMessage{
-				UserID: c.User.ID,
-				Offer:  offer,
-			}
-			c.sendMessage("sdp_offer", offerMsg)
-
-			// Пересылаем RTP пакеты
-			for {
-				packet, _, err := remote.ReadRTP()
-				if err != nil {
-					h.log.Debug().Err(err).Msg("Failed to read RTP packet")
-					return
-				}
-
-				if err := local.WriteRTP(packet); err != nil {
-					h.log.Debug().Err(err).Msg("Failed to write RTP packet")
-					return
-				}
-			}
-		}(client, remoteTrack, localTrack)
+	// 1. Создаем локальный трек для вещания
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(
+		remoteTrack.Codec().RTPCodecCapability,
+		remoteTrack.ID(),
+		remoteTrack.StreamID(),
+	)
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to create local track")
+		return
 	}
+
+	// 2. Раздаем этот трек всем уже подключенным участникам комнаты
+	h.mu.RLock()
+	for _, client := range h.getClientsInRoom(sender.Room.ID) {
+		if client.ID == sender.ID || client.PeerConn == nil {
+			continue
+		}
+		h.attachTrackToClient(client, localTrack)
+	}
+	h.mu.RUnlock()
+
+	// 3. Единый цикл чтения входящего RTP-потока (Fan-out)
+	go func() {
+		defer func() {
+			// Удаляем трек у всех клиентов при завершении
+			h.mu.RLock()
+			for _, client := range h.getClientsInRoom(sender.Room.ID) {
+				if client.ID != sender.ID {
+					client.removeLocalTrack(remoteTrack.ID())
+				}
+			}
+			h.mu.RUnlock()
+		}()
+
+		for {
+			packet, _, err := remoteTrack.ReadRTP()
+			if err != nil {
+				h.log.Debug().Err(err).Msg("Finished reading RTP stream or track closed")
+				return
+			}
+
+			// Пишем один и тот же пакет в локальный трек
+			if err := localTrack.WriteRTP(packet); err != nil {
+				// Ошибки при записи в закрытый трек допустимы
+				continue
+			}
+		}
+	}()
+}
+
+// attachTrackToClient безопасно добавляет трек клиенту и инициирует renegotiation
+func (h *Hub) attachTrackToClient(client *Client, track *webrtc.TrackLocalStaticRTP) {
+	client.mu.Lock()
+	if client.PeerConn == nil {
+		client.mu.Unlock()
+		return
+	}
+
+	// Проверяем, не добавлен ли уже
+	if _, exists := client.localTracks[track.ID()]; exists {
+		client.mu.Unlock()
+		return
+	}
+
+	sender, err := client.PeerConn.AddTrack(track)
+	if err != nil {
+		client.mu.Unlock()
+		h.log.Error().Err(err).Msg("Failed to add track to PeerConnection")
+		return
+	}
+	_ = sender
+
+	client.localTracks[track.ID()] = track
+	client.mu.Unlock()
+
+	// Инициируем Renegotiation (Offer -> Client -> Answer)
+	go func(c *Client) {
+		offer, err := c.PeerConn.CreateOffer(nil)
+		if err != nil {
+			h.log.Error().Err(err).Msg("Failed to create offer for renegotiation")
+			return
+		}
+
+		if err := c.PeerConn.SetLocalDescription(offer); err != nil {
+			h.log.Error().Err(err).Msg("Failed to set local description")
+			return
+		}
+
+		offerMsg := SDPOfferMessage{
+			UserID: c.User.ID,
+			Offer:  offer,
+		}
+		c.sendMessage("sdp_offer", offerMsg)
+	}(client)
 }
 
 func generateID() string {
