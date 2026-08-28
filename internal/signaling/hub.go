@@ -5,8 +5,8 @@ import (
 	"sync"
 	
 	"github.com/rs/zerolog"
-	"github.com/yourusername/voicechat/internal/config"
-	"github.com/yourusername/voicechat/internal/models"
+	"github.com/rismotemch/voicechat/internal/config"
+	"github.com/rismotemch/voicechat/internal/models"
 )
 
 type Hub struct {

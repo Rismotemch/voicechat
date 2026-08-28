@@ -7,9 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 	
-	"github.com/yourusername/voicechat/internal/config"
-	"github.com/yourusername/voicechat/internal/logger"
-	"github.com/yourusername/voicechat/internal/signaling"
+	"github.com/rismotemch/voicechat/internal/config"
+	"github.com/rismotemch/voicechat/internal/logger"
+	"github.com/rismotemch/voicechat/internal/signaling"
 )
 
 func main() {
