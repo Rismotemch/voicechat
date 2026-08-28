@@ -106,7 +106,10 @@ async function joinRoom() {
 
 async function connectWebSocket() {
     return new Promise((resolve, reject) => {
-        const wsUrl = `wss://${window.location.host}/ws`;
+        // Добавляем токен из localStorage или конфигурации
+        const token = localStorage.getItem('voicechat_token') || '';
+        const wsUrl = `wss://${window.location.host}/ws?token=${token}`;
+        
         state.ws = new WebSocket(wsUrl);
         
         state.ws.onopen = () => {
