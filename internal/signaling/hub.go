@@ -444,9 +444,8 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		}
 	}
 
-	// Если есть домен, используем его для ICE
-	if h.cfg.Domain != "" {
-		// Резолвим домен в IP
+	// Если есть домен, резолвим его в IP для NAT
+	if h.cfg.Domain != "" && h.cfg.Domain != "localhost" {
 		ips, err := net.LookupIP(h.cfg.Domain)
 		if err == nil && len(ips) > 0 {
 			var ipStrings []string
@@ -461,8 +460,6 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 					Msg("Setting NAT 1-to-1 IPs from domain")
 				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
 			}
-		} else {
-			h.log.Warn().Err(err).Msg("Failed to resolve domain to IP")
 		}
 	}
 
@@ -497,14 +494,6 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	if err != nil {
 		return nil, err
 	}
-
-	// Логирование всех ICE кандидатов
-	peerConn.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
-		h.log.Info().
-			Str("clientId", client.ID).
-			Str("gatheringState", state.String()).
-			Msg("ICE gathering state changed")
-	})
 
 	// Обработка ICE кандидатов
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
