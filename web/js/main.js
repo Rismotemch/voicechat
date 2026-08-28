@@ -11,6 +11,13 @@ const state = {
     isMuted: false
 };
 
+// WebRTC configuration
+const rtcConfig = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }
+    ]
+};
+
 // DOM элементы
 const elements = {
     connectionPanel: document.getElementById('connectionPanel'),
@@ -37,7 +44,6 @@ function setupEventListeners() {
     elements.settingsBtn.addEventListener('click', openSettings);
     elements.closeSettingsBtn.addEventListener('click', closeSettings);
     
-    // Enter key in name input
     elements.userName.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
             joinRoom();
@@ -59,7 +65,6 @@ async function joinRoom() {
         return;
     }
     
-    // Save username
     localStorage.setItem('voicechat_username', userName);
     
     try {
@@ -80,7 +85,8 @@ async function joinRoom() {
             avatarColor: generateRandomColor()
         };
         
-        // TODO: Connect to WebSocket and setup WebRTC
+        // Connect WebSocket
+        await connectWebSocket();
         
         // Update UI
         elements.connectionPanel.style.display = 'none';
@@ -94,13 +100,225 @@ async function joinRoom() {
         
     } catch (error) {
         console.error('Failed to join room:', error);
-        alert('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
+        alert('Не удалось подключиться. Проверьте доступ к микрофону и интернет-соединение.');
+    }
+}
+
+async function connectWebSocket() {
+    return new Promise((resolve, reject) => {
+        const wsUrl = `wss://${window.location.host}/ws`;
+        state.ws = new WebSocket(wsUrl);
+        
+        state.ws.onopen = () => {
+            console.log('WebSocket connected');
+            
+            // Join room
+            sendWebSocketMessage('join', {
+                userId: state.user.id,
+                userName: state.user.name,
+                avatarColor: state.user.avatarColor
+            });
+            
+            resolve();
+        };
+        
+        state.ws.onmessage = (event) => {
+            handleWebSocketMessage(event.data);
+        };
+        
+        state.ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            reject(error);
+        };
+        
+        state.ws.onclose = () => {
+            console.log('WebSocket disconnected');
+            if (state.isJoined) {
+                leaveRoom();
+            }
+        };
+    });
+}
+
+function handleWebSocketMessage(data) {
+    try {
+        const message = JSON.parse(data);
+        console.log('Received message:', message.type);
+        
+        switch (message.type) {
+            case 'room_state':
+                handleRoomState(message.payload);
+                break;
+                
+            case 'user_joined':
+                handleUserJoined(message.payload);
+                break;
+                
+            case 'user_left':
+                handleUserLeft(message.payload);
+                break;
+                
+            case 'sdp_answer':
+                handleSDPAnswer(message.payload);
+                break;
+                
+            case 'ice_candidate':
+                handleICECandidate(message.payload);
+                break;
+                
+            case 'error':
+                console.error('Server error:', message.payload.message);
+                alert('Ошибка: ' + message.payload.message);
+                break;
+                
+            default:
+                console.warn('Unknown message type:', message.type);
+        }
+    } catch (error) {
+        console.error('Failed to parse message:', error);
+    }
+}
+
+function handleRoomState(payload) {
+    console.log('Room state:', payload);
+    
+    // Add existing users
+    payload.users.forEach(user => {
+        if (user.id !== state.user.id) {
+            addParticipantToUI(user, false);
+            createPeerConnectionForUser(user.id);
+        }
+    });
+}
+
+function handleUserJoined(payload) {
+    console.log('User joined:', payload.user);
+    
+    if (payload.user.id !== state.user.id) {
+        addParticipantToUI(payload.user, false);
+    }
+}
+
+function handleUserLeft(payload) {
+    console.log('User left:', payload.userId);
+    
+    const participant = state.participants.get(payload.userId);
+    if (participant) {
+        participant.card.remove();
+        state.participants.delete(payload.userId);
+    }
+}
+
+async function handleSDPAnswer(payload) {
+    console.log('SDP answer received');
+    
+    if (state.peerConnection) {
+        await state.peerConnection.setRemoteDescription(payload.answer);
+    }
+}
+
+async function handleICECandidate(payload) {
+    console.log('ICE candidate received');
+    
+    if (state.peerConnection && payload.candidate) {
+        await state.peerConnection.addIceCandidate(payload.candidate);
+    }
+}
+
+async function createPeerConnectionForUser(userId) {
+    console.log('Creating PeerConnection');
+    
+    // Create RTCPeerConnection
+    state.peerConnection = new RTCPeerConnection(rtcConfig);
+    
+    // Add local stream
+    state.localStream.getTracks().forEach(track => {
+        state.peerConnection.addTrack(track, state.localStream);
+    });
+    
+    // Handle incoming tracks
+    state.peerConnection.ontrack = (event) => {
+        console.log('Received remote track');
+        const remoteStream = event.streams[0];
+        
+        // Create audio element for this stream
+        createAudioElement(userId, remoteStream);
+    };
+    
+    // Handle ICE candidates
+    state.peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+            sendWebSocketMessage('ice_candidate', {
+                userId: state.user.id,
+                candidate: event.candidate
+            });
+        }
+    };
+    
+    // Create offer
+    const offer = await state.peerConnection.createOffer();
+    await state.peerConnection.setLocalDescription(offer);
+    
+    // Send offer to server
+    sendWebSocketMessage('sdp_offer', {
+        userId: state.user.id,
+        offer: offer
+    });
+}
+
+function createAudioElement(userId, stream) {
+    console.log('Creating audio element for user:', userId);
+    
+    if (!state.audioContext) {
+        state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    const audioElement = document.createElement('audio');
+    audioElement.autoplay = true;
+    audioElement.srcObject = stream;
+    audioElement.id = `audio-${userId}`;
+    
+    // Create volume control
+    const gainNode = state.audioContext.createGain();
+    const source = state.audioContext.createMediaStreamSource(stream);
+    source.connect(gainNode);
+    gainNode.connect(state.audioContext.destination);
+    
+    // Store audio elements
+    const participant = state.participants.get(userId);
+    if (participant) {
+        participant.audioElement = audioElement;
+        participant.gainNode = gainNode;
+        participant.source = source;
+    }
+    
+    document.body.appendChild(audioElement);
+}
+
+function sendWebSocketMessage(type, payload) {
+    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        const message = {
+            type: type,
+            payload: payload
+        };
+        state.ws.send(JSON.stringify(message));
     }
 }
 
 function leaveRoom() {
-    // TODO: Close WebSocket and WebRTC connections
-    state.isJoined = false;
+    console.log('Leaving room');
+    
+    // Close WebSocket
+    if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+    }
+    
+    // Close PeerConnection
+    if (state.peerConnection) {
+        state.peerConnection.close();
+        state.peerConnection = null;
+    }
     
     // Stop all tracks
     if (state.localStream) {
@@ -108,11 +326,28 @@ function leaveRoom() {
         state.localStream = null;
     }
     
+    // Clean up audio elements
+    state.participants.forEach((participant, userId) => {
+        if (participant.audioElement) {
+            participant.audioElement.remove();
+        }
+        if (participant.gainNode) {
+            participant.gainNode.disconnect();
+        }
+        if (participant.source) {
+            participant.source.disconnect();
+        }
+    });
+    
+    // Clear participants
+    state.participants.clear();
+    
     // Update UI
     elements.connectionPanel.style.display = 'block';
     elements.participantsGrid.style.display = 'none';
     elements.participantsGrid.innerHTML = '';
     
+    state.isJoined = false;
     console.log('Left room');
 }
 
@@ -162,8 +397,10 @@ function addParticipantToUI(user, isSelf = false) {
         volumeControl.value = '100';
         volumeControl.className = 'volume-control';
         volumeControl.addEventListener('input', (e) => {
-            // TODO: Apply volume
-            console.log('Volume for', user.id, ':', e.target.value);
+            const participant = state.participants.get(user.id);
+            if (participant && participant.gainNode) {
+                participant.gainNode.gain.value = e.target.value / 100;
+            }
         });
         card.appendChild(volumeControl);
     }
