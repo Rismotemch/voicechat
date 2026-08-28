@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#121212">
+    <title>Voice Chat</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icons/icon-192.png" type="image/png">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="logo">🎙️ VoiceChat</h1>
+                <span class="room-name">Комната: main</span>
+            </div>
+            <div class="header-right">
+                <button id="settingsBtn" class="icon-btn" title="Настройки">⚙️</button>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <main class="main-content">
+            <!-- Connection panel -->
+            <div id="connectionPanel" class="connection-panel glass">
+                <h2>Присоединиться к разговору</h2>
+                <div class="input-group">
+                    <label for="userName">Ваше имя:</label>
+                    <input type="text" id="userName" placeholder="Введите имя" maxlength="30">
+                </div>
+                <button id="joinBtn" class="primary-btn">Присоединиться</button>
+            </div>
+
+            <!-- Participants grid -->
+            <div id="participantsGrid" class="participants-grid" style="display: none;">
+                <!-- Participant cards will be added here -->
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="controls">
+                <button id="micBtn" class="control-btn" title="Микрофон">🎤</button>
+                <button id="leaveBtn" class="control-btn danger" title="Покинуть">📞</button>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Modals -->
+    <div id="settingsModal" class="modal" style="display: none;">
+        <div class="modal-content glass">
+            <h3>Настройки</h3>
+            <!-- Settings content will be added -->
+            <button id="closeSettingsBtn" class="primary-btn">Закрыть</button>
+        </div>
+    </div>
+
+    <script src="js/main.js"></script>
+</body>
+</html>
