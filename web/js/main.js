@@ -14,15 +14,9 @@ const state = {
     pendingCandidates: []
 };
 
-// WebRTC configuration
+// WebRTC configuration - используем TURN как основной механизм
 const rtcConfig = {
     iceServers: [
-        {
-            urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302'
-            ]
-        },
         {
             urls: [
                 'turn:voice.repozis.ru:3478',
@@ -33,7 +27,7 @@ const rtcConfig = {
         }
     ],
     iceCandidatePoolSize: 10,
-    iceTransportPolicy: 'all'
+    iceTransportPolicy: 'relay'  // Принудительно использовать TURN
 };
 
 // DOM элементы
