@@ -18,19 +18,19 @@ type User struct {
 }
 
 type Position struct {
-	X float64 `json:"x"`
-	Y float64 `json:"y"`
-	Z float64 `json:"z"`
-	Dimension string `json:"dimension"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Z         float64 `json:"z"`
+	Dimension string  `json:"dimension"`
 }
 
 type Room struct {
-	mu          sync.RWMutex
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	Users       map[string]*User `json:"users"`
-	MaxUsers    int              `json:"maxUsers"`
-	CreatedAt   time.Time        `json:"createdAt"`
+	mu        sync.RWMutex
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Users     map[string]*User `json:"users"`
+	MaxUsers  int              `json:"maxUsers"`
+	CreatedAt time.Time        `json:"createdAt"`
 }
 
 func NewRoom(name string, maxUsers int) *Room {
@@ -46,11 +46,11 @@ func NewRoom(name string, maxUsers int) *Room {
 func (r *Room) AddUser(user *User) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	if len(r.Users) >= r.MaxUsers {
 		return ErrRoomFull
 	}
-	
+
 	r.Users[user.ID] = user
 	return nil
 }
@@ -71,7 +71,7 @@ func (r *Room) GetUser(userID string) (*User, bool) {
 func (r *Room) GetUsers() []*User {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	
+
 	users := make([]*User, 0, len(r.Users))
 	for _, user := range r.Users {
 		users = append(users, user)
