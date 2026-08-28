@@ -288,12 +288,11 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.Room = room
 
 	// Отправляем текущее состояние комнаты
-	roomState := RoomStateMessage{
+	c.sendMessage("room_state", RoomStateMessage{
 		Users: room.GetUsers(),
-	}
-	c.sendMessage("room_state", roomState)
+	})
 
-	// Уведомляем других
+	// Оповещаем остальных
 	for _, client := range c.Hub.getClientsInRoom(room.ID) {
 		if client.ID != c.ID {
 			client.sendMessage("user_joined", UserJoinedMessage{User: user})
@@ -557,9 +556,9 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 	h.log.Info().
 		Str("senderId", sender.ID).
 		Str("trackID", remoteTrack.ID()).
-		Msg("Starting track forwarding")
+		Str("codec", remoteTrack.Codec().MimeType).
+		Msg("Started forwarding remote track")
 
-	// 1. Создаем локальный трек для вещания
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		remoteTrack.Codec().RTPCodecCapability,
 		remoteTrack.ID(),
@@ -570,39 +569,27 @@ func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
 		return
 	}
 
-	// 2. Раздаем этот трек всем уже подключенным участникам комнаты
+	// Сохраняем локальный трек у отправителя в хабе
+	sender.addLocalTrack(remoteTrack.ID(), localTrack)
+
+	// Добавляем этот трек всем другим клиентам комнаты
 	h.mu.RLock()
 	for _, client := range h.getClientsInRoom(sender.Room.ID) {
-		if client.ID == sender.ID || client.PeerConn == nil {
-			continue
+		if client.ID != sender.ID && client.PeerConn != nil {
+			h.attachTrackToClient(client, localTrack)
 		}
-		h.attachTrackToClient(client, localTrack)
 	}
 	h.mu.RUnlock()
 
-	// 3. Единый цикл чтения входящего RTP-потока (Fan-out)
+	// Читаем пакеты от отправителя и пишем в localTrack
 	go func() {
-		defer func() {
-			// Удаляем трек у всех клиентов при завершении
-			h.mu.RLock()
-			for _, client := range h.getClientsInRoom(sender.Room.ID) {
-				if client.ID != sender.ID {
-					client.removeLocalTrack(remoteTrack.ID())
-				}
-			}
-			h.mu.RUnlock()
-		}()
-
+		buf := make([]byte, 1500)
 		for {
-			packet, _, err := remoteTrack.ReadRTP()
-			if err != nil {
-				h.log.Debug().Err(err).Msg("Finished reading RTP stream or track closed")
+			n, _, readErr := remoteTrack.Read(buf)
+			if readErr != nil {
 				return
 			}
-
-			// Пишем один и тот же пакет в локальный трек
-			if err := localTrack.WriteRTP(packet); err != nil {
-				// Ошибки при записи в закрытый трек допустимы
+			if _, writeErr := localTrack.Write(buf[:n]); writeErr != nil {
 				continue
 			}
 		}

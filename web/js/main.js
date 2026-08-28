@@ -20,24 +20,20 @@ const rtcConfig = {
         {
             urls: [
                 'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302'
+                'stun:stun1.l.google.com:19302',
+                'stun:voice.repozis.ru:3478'
             ]
         },
         {
-            urls: 'turn:voice.repozis.ru:3478?transport=udp',
-            username: 'voicechat',
-            credential: 'voicechat123'
-        },
-        {
-            urls: 'turn:voice.repozis.ru:3478?transport=tcp',
+            urls: [
+                'turn:voice.repozis.ru:3478?transport=udp',
+                'turn:voice.repozis.ru:3478?transport=tcp'
+            ],
             username: 'voicechat',
             credential: 'voicechat123'
         }
     ],
-    iceCandidatePoolSize: 10,
-    iceTransportPolicy: 'all',
-    bundlePolicy: 'max-bundle',
-    rtcpMuxPolicy: 'require'
+    iceCandidatePoolSize: 10
 };
 
 // DOM элементы
