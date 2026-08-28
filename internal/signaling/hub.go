@@ -9,16 +9,15 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v3"
 	"github.com/rs/zerolog"
+	"github.com/google/uuid"
 	"github.com/rismotemch/voicechat/internal/config"
 	"github.com/rismotemch/voicechat/internal/models"
-	"github.com/google/uuid"
 )
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// В production можно проверять origin
 		return true
 	},
 }
@@ -35,11 +34,11 @@ type Client struct {
 }
 
 type Hub struct {
-	cfg      *config.Config
-	log      zerolog.Logger
-	rooms    map[string]*models.Room
-	clients  map[string]*Client
-	mu       sync.RWMutex
+	cfg     *config.Config
+	log     zerolog.Logger
+	rooms   map[string]*models.Room
+	clients map[string]*Client
+	mu      sync.RWMutex
 }
 
 type Message struct {
@@ -48,8 +47,8 @@ type Message struct {
 }
 
 type JoinMessage struct {
-	UserID   string `json:"userId"`
-	UserName string `json:"userName"`
+	UserID      string `json:"userId"`
+	UserName    string `json:"userName"`
 	AvatarColor string `json:"avatarColor"`
 }
 
@@ -64,7 +63,7 @@ type SDPAnswerMessage struct {
 }
 
 type ICECandidateMessage struct {
-	UserID   string                   `json:"userId"`
+	UserID    string                   `json:"userId"`
 	Candidate webrtc.ICECandidateInit `json:"candidate"`
 }
 
@@ -92,7 +91,6 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 		clients: make(map[string]*Client),
 	}
 
-	// Create default room
 	room := models.NewRoom(cfg.RoomName, cfg.MaxUsers)
 	hub.rooms[cfg.RoomName] = room
 
@@ -105,7 +103,6 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// Check auth token if configured
 	if h.cfg.AuthToken != "" {
 		token := r.URL.Query().Get("token")
 		if token != h.cfg.AuthToken {
@@ -130,12 +127,10 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Hub:  h,
 	}
 
-	// Register client
 	h.mu.Lock()
 	h.clients[client.ID] = client
 	h.mu.Unlock()
 
-	// Start goroutines
 	go client.writePump()
 	go client.readPump()
 }
@@ -157,7 +152,7 @@ func (c *Client) readPump() {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.Hub.log.Error().Err(err).Msg("WebSocket read error")
+				c.Hub.log.Debug().Err(err).Msg("WebSocket read error")
 			}
 			break
 		}
@@ -182,7 +177,6 @@ func (c *Client) writePump() {
 				return
 			}
 
-			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
@@ -239,7 +233,6 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		Str("userName", msg.UserName).
 		Msg("User joining room")
 
-	// Create user
 	user := &models.User{
 		ID:          msg.UserID,
 		Name:        msg.UserName,
@@ -247,14 +240,12 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		JoinedAt:    time.Now(),
 	}
 
-	// Get room
 	room := c.Hub.getRoom()
 	if room == nil {
 		c.sendError("Room not found")
 		return
 	}
 
-	// Add user to room
 	if err := room.AddUser(user); err != nil {
 		c.sendError("Room is full")
 		return
@@ -263,13 +254,13 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.User = user
 	c.Room = room
 
-	// Send current room state to the new user
+	// Отправляем текущее состояние комнаты
 	roomState := RoomStateMessage{
 		Users: room.GetUsers(),
 	}
 	c.sendMessage("room_state", roomState)
 
-	// Notify other users about new participant
+	// Уведомляем других
 	for _, client := range c.Hub.getClientsInRoom(room.ID) {
 		if client.ID != c.ID {
 			client.sendMessage("user_joined", UserJoinedMessage{User: user})
@@ -288,7 +279,12 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		Str("userId", msg.UserID).
 		Msg("Received SDP offer")
 
-	// Create PeerConnection for this client
+	// Закрываем старое соединение если есть
+	if c.PeerConn != nil {
+		c.PeerConn.Close()
+	}
+
+	// Создаём новое PeerConnection
 	peerConn, err := c.Hub.createPeerConnection(c)
 	if err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to create PeerConnection")
@@ -298,14 +294,14 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 
 	c.PeerConn = peerConn
 
-	// Set remote description
+	// Устанавливаем remote description
 	if err := peerConn.SetRemoteDescription(msg.Offer); err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to set remote description")
 		c.sendError("Failed to set remote description")
 		return
 	}
 
-	// Create answer
+	// Создаём answer
 	answer, err := peerConn.CreateAnswer(nil)
 	if err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to create answer")
@@ -313,14 +309,14 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		return
 	}
 
-	// Set local description
+	// Устанавливаем local description
 	if err := peerConn.SetLocalDescription(answer); err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to set local description")
 		c.sendError("Failed to set local description")
 		return
 	}
 
-	// Send answer back to client
+	// Отправляем answer
 	answerMsg := SDPAnswerMessage{
 		UserID: msg.UserID,
 		Answer: answer,
@@ -329,12 +325,7 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 }
 
 func (c *Client) handleICECandidate(msg ICECandidateMessage) {
-	c.Hub.log.Debug().
-		Str("userId", msg.UserID).
-		Msg("Received ICE candidate")
-
 	if c.PeerConn == nil {
-		c.Hub.log.Warn().Msg("PeerConnection is nil, cannot add ICE candidate")
 		return
 	}
 
@@ -396,16 +387,13 @@ func (h *Hub) removeClient(client *Client) {
 		Str("clientId", client.ID).
 		Msg("Client disconnected")
 
-	// Remove from clients map
 	h.mu.Lock()
 	delete(h.clients, client.ID)
 	h.mu.Unlock()
 
-	// Remove from room
 	if client.Room != nil && client.User != nil {
 		client.Room.RemoveUser(client.User.ID)
 
-		// Notify other users
 		for _, c := range h.getClientsInRoom(client.Room.ID) {
 			c.sendMessage("user_left", UserLeftMessage{UserID: client.User.ID})
 		}
@@ -417,14 +405,12 @@ func (h *Hub) removeClient(client *Client) {
 			Msg("User left room")
 	}
 
-	// Close PeerConnection if exists
 	if client.PeerConn != nil {
 		client.PeerConn.Close()
 	}
 }
 
 func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, error) {
-	// Create WebRTC configuration
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -433,35 +419,36 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		},
 	}
 
-	// Create PeerConnection
 	peerConn, err := webrtc.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
 
-	// Handle ICE candidate generation
+	// Обработка ICE кандидатов
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			candidateMsg := ICECandidateMessage{
-				UserID:   client.User.ID,
+				UserID:    client.User.ID,
 				Candidate: candidate.ToJSON(),
 			}
 			client.sendMessage("ice_candidate", candidateMsg)
 		}
 	})
 
-	// Handle incoming tracks
+	// Обработка входящих треков
 	peerConn.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		h.log.Info().
 			Str("clientId", client.ID).
-			Str("trackKind", track.Kind().String()).
+			Str("trackID", track.ID()).
+			Str("streamID", track.StreamID()).
+			Str("codec", track.Codec().MimeType).
 			Msg("Received track")
 
-		// Forward track to all other clients in the room
-		h.forwardTrack(client, track, receiver)
+		// Пересылаем трек всем остальным
+		h.forwardTrack(client, track)
 	})
 
-	// Handle connection state changes
+	// Логирование состояния соединения
 	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		h.log.Debug().
 			Str("clientId", client.ID).
@@ -472,47 +459,61 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 	return peerConn, nil
 }
 
-func (h *Hub) forwardTrack(sender *Client, track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-	// Get all other clients in the room
+func (h *Hub) forwardTrack(sender *Client, remoteTrack *webrtc.TrackRemote) {
+	// Для каждого клиента в комнате
 	for _, client := range h.getClientsInRoom(sender.Room.ID) {
-		if client.ID == sender.ID || client.PeerConn == nil {
+		// Пропускаем отправителя
+		if client.ID == sender.ID {
 			continue
 		}
 
-		// Create a local track to send to the client
+		// Проверяем, что у клиента есть PeerConnection
+		if client.PeerConn == nil {
+			continue
+		}
+
+		h.log.Info().
+			Str("fromUser", sender.User.ID).
+			Str("toUser", client.User.ID).
+			Str("trackID", remoteTrack.ID()).
+			Msg("Forwarding track")
+
+		// Создаём локальный трек
 		localTrack, err := webrtc.NewTrackLocalStaticRTP(
-			track.Codec().RTPCodecCapability,
-			track.ID(),
-			track.StreamID(),
+			remoteTrack.Codec().RTPCodecCapability,
+			remoteTrack.ID(),
+			remoteTrack.StreamID(),
 		)
 		if err != nil {
 			h.log.Error().Err(err).Msg("Failed to create local track")
 			continue
 		}
 
-		// Add track to client's PeerConnection
+		// Добавляем трек к PeerConnection клиента
 		if _, err := client.PeerConn.AddTrack(localTrack); err != nil {
-			h.log.Error().Err(err).Msg("Failed to add track to PeerConnection")
+			h.log.Error().Err(err).Msg("Failed to add track")
 			continue
 		}
 
-		// Start forwarding RTP packets
-		go h.forwardRTPPackets(client, track, localTrack)
-	}
-}
+		// Запускаем пересылку пакетов
+		go func(c *Client, remote *webrtc.TrackRemote, local *webrtc.TrackLocalStaticRTP) {
+			defer func() {
+				h.log.Debug().
+					Str("toUser", c.User.ID).
+					Msg("Stopped forwarding track")
+			}()
 
-func (h *Hub) forwardRTPPackets(client *Client, remoteTrack *webrtc.TrackRemote, localTrack *webrtc.TrackLocalStaticRTP) {
-	for {
-		packet, _, err := remoteTrack.ReadRTP()
-		if err != nil {
-			h.log.Debug().Err(err).Msg("Failed to read RTP packet")
-			return
-		}
+			for {
+				packet, _, err := remote.ReadRTP()
+				if err != nil {
+					return
+				}
 
-		if err := localTrack.WriteRTP(packet); err != nil {
-			h.log.Debug().Err(err).Msg("Failed to write RTP packet")
-			return
-		}
+				if err := local.WriteRTP(packet); err != nil {
+					return
+				}
+			}
+		}(client, remoteTrack, localTrack)
 	}
 }
 
@@ -531,7 +532,6 @@ func (h *Hub) GetRoomUserCount() int {
 func (h *Hub) Close() {
 	h.log.Info().Msg("Closing signaling hub")
 
-	// Close all connections
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 

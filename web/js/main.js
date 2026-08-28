@@ -8,7 +8,9 @@ const state = {
     participants: new Map(),
     audioContext: null,
     isJoined: false,
-    isMuted: false
+    isMuted: false,
+    reconnectAttempts: 0,
+    maxReconnectAttempts: 3
 };
 
 // WebRTC configuration
@@ -56,11 +58,6 @@ function loadUserFromStorage() {
     if (savedName) {
         elements.userName.value = savedName;
     }
-    
-    const savedToken = localStorage.getItem('voicechat_token');
-    if (savedToken) {
-        document.getElementById('authToken').value = savedToken;
-    }
 }
 
 async function joinRoom() {
@@ -85,7 +82,7 @@ async function joinRoom() {
         
         state.localStream = stream;
         state.user = {
-            id: generateUserId(),
+            id: 'user_' + Math.random().toString(36).substr(2, 9),
             name: userName,
             avatarColor: generateRandomColor()
         };
@@ -102,11 +99,6 @@ async function joinRoom() {
         
         state.isJoined = true;
         console.log('Joined room as', userName);
-
-	const authToken = document.getElementById('authToken').value.trim();
-	if (authToken) {
-    	    localStorage.setItem('voicechat_token', authToken);
-	}
         
     } catch (error) {
         console.error('Failed to join room:', error);
@@ -116,10 +108,7 @@ async function joinRoom() {
 
 async function connectWebSocket() {
     return new Promise((resolve, reject) => {
-        // Добавляем токен из localStorage или конфигурации
-        const token = localStorage.getItem('voicechat_token') || '';
-        const wsUrl = `wss://${window.location.host}/ws?token=${token}`;
-        
+        const wsUrl = `wss://${window.location.host}/ws`;
         state.ws = new WebSocket(wsUrl);
         
         state.ws.onopen = () => {
@@ -146,7 +135,13 @@ async function connectWebSocket() {
         
         state.ws.onclose = () => {
             console.log('WebSocket disconnected');
-            if (state.isJoined) {
+            if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
+                state.reconnectAttempts++;
+                console.log(`Reconnecting... Attempt ${state.reconnectAttempts}`);
+                setTimeout(() => {
+                    connectWebSocket().catch(console.error);
+                }, 2000);
+            } else if (state.isJoined) {
                 leaveRoom();
             }
         };
@@ -181,7 +176,6 @@ function handleWebSocketMessage(data) {
                 
             case 'error':
                 console.error('Server error:', message.payload.message);
-                alert('Ошибка: ' + message.payload.message);
                 break;
                 
             default:
@@ -195,13 +189,15 @@ function handleWebSocketMessage(data) {
 function handleRoomState(payload) {
     console.log('Room state:', payload);
     
-    // Add existing users
+    // Добавляем существующих пользователей
     payload.users.forEach(user => {
         if (user.id !== state.user.id) {
             addParticipantToUI(user, false);
-            createPeerConnectionForUser(user.id);
         }
     });
+    
+    // Создаём PeerConnection после получения состояния комнаты
+    createPeerConnection();
 }
 
 function handleUserJoined(payload) {
@@ -217,6 +213,15 @@ function handleUserLeft(payload) {
     
     const participant = state.participants.get(payload.userId);
     if (participant) {
+        if (participant.audioElement) {
+            participant.audioElement.remove();
+        }
+        if (participant.gainNode) {
+            participant.gainNode.disconnect();
+        }
+        if (participant.source) {
+            participant.source.disconnect();
+        }
         participant.card.remove();
         state.participants.delete(payload.userId);
     }
@@ -226,7 +231,12 @@ async function handleSDPAnswer(payload) {
     console.log('SDP answer received');
     
     if (state.peerConnection) {
-        await state.peerConnection.setRemoteDescription(payload.answer);
+        try {
+            await state.peerConnection.setRemoteDescription(payload.answer);
+            console.log('Remote description set successfully');
+        } catch (error) {
+            console.error('Failed to set remote description:', error);
+        }
     }
 }
 
@@ -234,33 +244,52 @@ async function handleICECandidate(payload) {
     console.log('ICE candidate received');
     
     if (state.peerConnection && payload.candidate) {
-        await state.peerConnection.addIceCandidate(payload.candidate);
+        try {
+            await state.peerConnection.addIceCandidate(payload.candidate);
+            console.log('ICE candidate added successfully');
+        } catch (error) {
+            console.error('Failed to add ICE candidate:', error);
+        }
     }
 }
 
-async function createPeerConnectionForUser(userId) {
+async function createPeerConnection() {
     console.log('Creating PeerConnection');
     
-    // Create RTCPeerConnection
+    // Закрываем старое соединение если есть
+    if (state.peerConnection) {
+        state.peerConnection.close();
+    }
+    
+    // Создаём новое RTCPeerConnection
     state.peerConnection = new RTCPeerConnection(rtcConfig);
     
-    // Add local stream
+    // Добавляем локальный поток
     state.localStream.getTracks().forEach(track => {
         state.peerConnection.addTrack(track, state.localStream);
+        console.log('Added local track:', track.kind);
     });
     
-    // Handle incoming tracks
+    // Обработка входящих треков
     state.peerConnection.ontrack = (event) => {
-        console.log('Received remote track');
-        const remoteStream = event.streams[0];
+        console.log('Received remote track:', event.track.kind);
+        console.log('Streams:', event.streams);
         
-        // Create audio element for this stream
-        createAudioElement(userId, remoteStream);
+        if (event.track.kind === 'audio') {
+            const remoteStream = event.streams[0];
+            if (remoteStream) {
+                // Определяем, от кого пришёл трек
+                // В SFU трек может прийти от любого пользователя
+                // Нужно сопоставить stream ID с пользователем
+                createAudioElement(event.track, remoteStream);
+            }
+        }
     };
     
-    // Handle ICE candidates
+    // Обработка ICE кандидатов
     state.peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
+            console.log('Sending ICE candidate');
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
                 candidate: event.candidate
@@ -268,19 +297,28 @@ async function createPeerConnectionForUser(userId) {
         }
     };
     
-    // Create offer
-    const offer = await state.peerConnection.createOffer();
-    await state.peerConnection.setLocalDescription(offer);
+    // Логирование состояния соединения
+    state.peerConnection.onconnectionstatechange = () => {
+        console.log('Connection state:', state.peerConnection.connectionState);
+    };
     
-    // Send offer to server
-    sendWebSocketMessage('sdp_offer', {
-        userId: state.user.id,
-        offer: offer
-    });
+    // Создаём offer
+    try {
+        const offer = await state.peerConnection.createOffer();
+        await state.peerConnection.setLocalDescription(offer);
+        console.log('Sending SDP offer');
+        
+        sendWebSocketMessage('sdp_offer', {
+            userId: state.user.id,
+            offer: offer
+        });
+    } catch (error) {
+        console.error('Failed to create offer:', error);
+    }
 }
 
-function createAudioElement(userId, stream) {
-    console.log('Creating audio element for user:', userId);
+function createAudioElement(track, stream) {
+    console.log('Creating audio element for track:', track.id);
     
     if (!state.audioContext) {
         state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -289,23 +327,20 @@ function createAudioElement(userId, stream) {
     const audioElement = document.createElement('audio');
     audioElement.autoplay = true;
     audioElement.srcObject = stream;
-    audioElement.id = `audio-${userId}`;
     
-    // Create volume control
+    // Создаём усиление для контроля громкости
     const gainNode = state.audioContext.createGain();
     const source = state.audioContext.createMediaStreamSource(stream);
     source.connect(gainNode);
     gainNode.connect(state.audioContext.destination);
     
-    // Store audio elements
-    const participant = state.participants.get(userId);
-    if (participant) {
-        participant.audioElement = audioElement;
-        participant.gainNode = gainNode;
-        participant.source = source;
-    }
+    // Сохраняем ссылки
+    const audioId = `audio-${Date.now()}`;
+    audioElement.id = audioId;
     
     document.body.appendChild(audioElement);
+    
+    console.log('Audio element created:', audioId);
 }
 
 function sendWebSocketMessage(type, payload) {
@@ -315,11 +350,15 @@ function sendWebSocketMessage(type, payload) {
             payload: payload
         };
         state.ws.send(JSON.stringify(message));
+    } else {
+        console.warn('WebSocket is not connected');
     }
 }
 
 function leaveRoom() {
     console.log('Leaving room');
+    
+    state.reconnectAttempts = 0;
     
     // Close WebSocket
     if (state.ws) {
@@ -410,20 +449,14 @@ function addParticipantToUI(user, isSelf = false) {
         volumeControl.value = '100';
         volumeControl.className = 'volume-control';
         volumeControl.addEventListener('input', (e) => {
-            const participant = state.participants.get(user.id);
-            if (participant && participant.gainNode) {
-                participant.gainNode.gain.value = e.target.value / 100;
-            }
+            // TODO: Применить громкость к конкретному потоку
+            console.log('Volume for', user.id, ':', e.target.value);
         });
         card.appendChild(volumeControl);
     }
     
     elements.participantsGrid.appendChild(card);
     state.participants.set(user.id, { user, card, isSelf });
-}
-
-function generateUserId() {
-    return 'user_' + Math.random().toString(36).substr(2, 9);
 }
 
 function generateRandomColor() {
