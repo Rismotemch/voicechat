@@ -56,6 +56,11 @@ function loadUserFromStorage() {
     if (savedName) {
         elements.userName.value = savedName;
     }
+    
+    const savedToken = localStorage.getItem('voicechat_token');
+    if (savedToken) {
+        document.getElementById('authToken').value = savedToken;
+    }
 }
 
 async function joinRoom() {
@@ -97,6 +102,11 @@ async function joinRoom() {
         
         state.isJoined = true;
         console.log('Joined room as', userName);
+
+	const authToken = document.getElementById('authToken').value.trim();
+	if (authToken) {
+    	    localStorage.setItem('voicechat_token', authToken);
+	}
         
     } catch (error) {
         console.error('Failed to join room:', error);
