@@ -54,6 +54,8 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /opt/voicechat
+            docker compose down
+            docker system prune -af
             git pull
             docker compose down
             docker compose up -d --build
