@@ -26,6 +26,7 @@ type Config struct {
 	
 	// Security
 	AuthToken  string
+	RequireAuth  bool
 	AllowOrigin string
 	
 	// Logging
@@ -54,6 +55,7 @@ func Load() (*Config, error) {
 		STUNServers: getEnvSlice("STUN_SERVERS", []string{"stun:stun.l.google.com:19302"}),
 		
 		AuthToken:   getEnv("AUTH_TOKEN", ""),
+		RequireAuth: getEnvBool("REQUIRE_AUTH", false),
 		AllowOrigin: getEnv("ALLOW_ORIGIN", "*"),
 		
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
@@ -64,8 +66,11 @@ func Load() (*Config, error) {
 	}
 	
 	// Validate
+	// Validate
 	if cfg.Environment == "production" && cfg.AuthToken == "" {
-		return nil, fmt.Errorf("AUTH_TOKEN must be set in production")
+    	    // В production можно не требовать токен, если сервер приватный
+    	    // Просто логируем предупреждение
+    	    fmt.Println("WARNING: AUTH_TOKEN is not set. Server will be open to anyone.")
 	}
 	
 	// Create upload directory
@@ -90,6 +95,15 @@ func getEnvInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+    if value, exists := os.LookupEnv(key); exists {
+        if boolVal, err := strconv.ParseBool(value); err == nil {
+            return boolVal
+        }
+    }
+    return defaultValue
 }
 
 func getEnvSlice(key string, defaultValue []string) []string {

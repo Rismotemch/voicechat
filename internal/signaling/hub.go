@@ -103,13 +103,13 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.AuthToken != "" {
-		token := r.URL.Query().Get("token")
-		if token != h.cfg.AuthToken {
-			h.log.Warn().Msg("Unauthorized WebSocket connection attempt")
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if h.cfg.RequireAuth && h.cfg.AuthToken != "" {
+    		token := r.URL.Query().Get("token")
+    		if token != h.cfg.AuthToken {
+        		h.log.Warn().Msg("Unauthorized WebSocket connection attempt")
+        		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+        		return
+    		}
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)

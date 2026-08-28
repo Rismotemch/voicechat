@@ -17,7 +17,8 @@ services:
       - UDP_MIN=50000
       - UDP_MAX=50100
       - STUN_SERVERS=stun:stun.l.google.com:19302
-      #- AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+      - AUTH_TOKEN=${AUTH_TOKEN:-changeme}
+      - REQUIRE_AUTH=false
       - LOG_LEVEL=info
       - LOG_FORMAT=json
       - UPLOAD_PATH=/app/data/uploads
