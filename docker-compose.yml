@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: voicechat
     restart: unless-stopped
-
+    network_mode: host
     environment:
       - PORT=8080
       - DOMAIN=voice.repozis.ru
@@ -17,30 +17,11 @@ services:
       - UDP_MIN=50000
       - UDP_MAX=50100
       - STUN_SERVERS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
-      - TURN_SERVERS=turn:voice.repozis.ru:3478,turn:voice.repozis.ru:3478?transport=tcp
+      - TURN_SERVERS=turn:voice.repozis.ru:3478
       - REQUIRE_AUTH=false
       - LOG_LEVEL=debug
       - LOG_FORMAT=json
       - UPLOAD_PATH=/app/data/uploads
       - MAX_UPLOAD_SIZE=104857600
-
-    ports:
-      - "8080:8080"
-      - "50000-51000:50000-51000/udp"
-
     volumes:
       - ./data:/app/data
-
-    networks:
-      - voicechat-network
-
-    healthcheck:
-      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-networks:
-  voicechat-network:
-    driver: bridge
