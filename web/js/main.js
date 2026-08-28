@@ -1,4 +1,3 @@
-// Глобальное состояние
 const state = {
     ws: null,
     peerConnection: null,
@@ -10,20 +9,13 @@ const state = {
     isJoined: false,
     isMuted: false,
     reconnectAttempts: 0,
-    maxReconnectAttempts: 3,
-    pendingCandidates: []
+    maxReconnectAttempts: 3
 };
 
-// WebRTC configuration
 const rtcConfig = {
     iceServers: [
-        {
-            urls: [
-                'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302',
-                'stun:voice.repozis.ru:3478'
-            ]
-        },
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
         {
             urls: [
                 'turn:voice.repozis.ru:3478?transport=udp',
@@ -33,10 +25,11 @@ const rtcConfig = {
             credential: 'voicechat123'
         }
     ],
-    iceCandidatePoolSize: 10
+    iceCandidatePoolSize: 10,
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
 };
 
-// DOM элементы
 const elements = {
     connectionPanel: document.getElementById('connectionPanel'),
     participantsGrid: document.getElementById('participantsGrid'),
@@ -49,7 +42,6 @@ const elements = {
     closeSettingsBtn: document.getElementById('closeSettingsBtn')
 };
 
-// Инициализация
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadUserFromStorage();
@@ -59,32 +51,29 @@ function setupEventListeners() {
     elements.joinBtn.addEventListener('click', joinRoom);
     elements.micBtn.addEventListener('click', toggleMute);
     elements.leaveBtn.addEventListener('click', leaveRoom);
-    elements.settingsBtn.addEventListener('click', openSettings);
-    elements.closeSettingsBtn.addEventListener('click', closeSettings);
+    if (elements.settingsBtn) elements.settingsBtn.addEventListener('click', openSettings);
+    if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', closeSettings);
 
     elements.userName.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            joinRoom();
-        }
+        if (e.key === 'Enter') joinRoom();
     });
 }
 
 function loadUserFromStorage() {
     const savedName = localStorage.getItem('voicechat_username');
-    if (savedName) {
-        elements.userName.value = savedName;
-    }
+    if (savedName) elements.userName.value = savedName;
 }
 
-async function joinRoom() {
-    // 1. Создаем и возобновляем AudioContext по первому жесту
+async function initAudioContext() {
     if (!state.audioContext) {
         state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
     }
     if (state.audioContext.state === 'suspended') {
         await state.audioContext.resume();
     }
+}
 
+async function joinRoom() {
     const userName = elements.userName.value.trim();
     if (!userName) {
         alert('Пожалуйста, введите имя');
@@ -94,59 +83,51 @@ async function joinRoom() {
     localStorage.setItem('voicechat_username', userName);
 
     try {
-        // Request microphone access
+        await initAudioContext();
+
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
-                autoGainControl: true,
-                channelCount: 1,
-                sampleRate: 48000
+                autoGainControl: true
             },
             video: false
         });
 
         state.localStream = stream;
         state.user = {
-            id: 'user_' + Math.random().toString(36).substr(2, 9),
+            id: 'user_' + Math.random().toString(36).substring(2, 11),
             name: userName,
             avatarColor: generateRandomColor()
         };
 
-        // Connect WebSocket
         await connectWebSocket();
 
-        // Update UI
         elements.connectionPanel.style.display = 'none';
         elements.participantsGrid.style.display = 'grid';
-
-        // Add self to participants
         addParticipantToUI(state.user, true);
 
         state.isJoined = true;
         console.log('Joined room as', userName);
-
     } catch (error) {
         console.error('Failed to join room:', error);
-        alert('Не удалось подключиться. Проверьте доступ к микрофону и интернет-соединение.');
+        alert('Не удалось подключиться к микрофону или серверу.');
     }
 }
 
 async function connectWebSocket() {
     return new Promise((resolve, reject) => {
-        const wsUrl = `wss://${window.location.host}/ws`;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
         state.ws = new WebSocket(wsUrl);
 
         state.ws.onopen = () => {
             console.log('WebSocket connected');
-
-            // Join room
             sendWebSocketMessage('join', {
                 userId: state.user.id,
                 userName: state.user.name,
                 avatarColor: state.user.avatarColor
             });
-
             resolve();
         };
 
@@ -163,10 +144,7 @@ async function connectWebSocket() {
             console.log('WebSocket disconnected');
             if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
                 state.reconnectAttempts++;
-                console.log(`Reconnecting... Attempt ${state.reconnectAttempts}`);
-                setTimeout(() => {
-                    connectWebSocket().catch(console.error);
-                }, 2000);
+                setTimeout(() => connectWebSocket().catch(console.error), 2000);
             } else if (state.isJoined) {
                 leaveRoom();
             }
@@ -177,39 +155,28 @@ async function connectWebSocket() {
 function handleWebSocketMessage(data) {
     try {
         const message = JSON.parse(data);
-        console.log('Received message:', message.type);
-
         switch (message.type) {
             case 'room_state':
                 handleRoomState(message.payload);
                 break;
-
             case 'user_joined':
                 handleUserJoined(message.payload);
                 break;
-
             case 'user_left':
                 handleUserLeft(message.payload);
                 break;
-
             case 'sdp_offer':
                 handleSDPOffer(message.payload);
                 break;
-
             case 'sdp_answer':
                 handleSDPAnswer(message.payload);
                 break;
-
             case 'ice_candidate':
                 handleICECandidate(message.payload);
                 break;
-
             case 'error':
                 console.error('Server error:', message.payload.message);
                 break;
-
-            default:
-                console.warn('Unknown message type:', message.type);
         }
     } catch (error) {
         console.error('Failed to parse message:', error);
@@ -217,61 +184,105 @@ function handleWebSocketMessage(data) {
 }
 
 function handleRoomState(payload) {
-    console.log('Room state:', payload);
-
-    // Добавляем существующих пользователей
-    payload.users.forEach(user => {
-        if (user.id !== state.user.id) {
-            addParticipantToUI(user, false);
-        }
-    });
-
-    // Создаём PeerConnection после получения состояния комнаты
+    if (payload.users) {
+        payload.users.forEach(user => {
+            if (user.id !== state.user.id) {
+                addParticipantToUI(user, false);
+            }
+        });
+    }
     createPeerConnection();
 }
 
 function handleUserJoined(payload) {
-    console.log('User joined:', payload.user);
-
-    if (payload.user.id !== state.user.id) {
+    if (payload.user && payload.user.id !== state.user.id) {
         addParticipantToUI(payload.user, false);
     }
 }
 
 function handleUserLeft(payload) {
-    console.log('User left:', payload.userId);
-
     const participant = state.participants.get(payload.userId);
     if (participant) {
-        if (participant.audioElement) {
-            participant.audioElement.remove();
-        }
-        if (participant.gainNode) {
-            participant.gainNode.disconnect();
-        }
-        if (participant.source) {
-            participant.source.disconnect();
-        }
+        const audio = document.getElementById(`audio-${payload.userId}`);
+        if (audio) audio.remove();
         participant.card.remove();
         state.participants.delete(payload.userId);
     }
 }
 
+async function createPeerConnection() {
+    console.log('Creating RTCPeerConnection');
+
+    if (state.peerConnection) {
+        state.peerConnection.close();
+        state.peerConnection = null;
+    }
+
+    const pc = new RTCPeerConnection(rtcConfig);
+    state.peerConnection = pc;
+
+    // 1. Привязываем обработчик кандидатов ДО отправки Offer
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            console.log('Generated local candidate:', event.candidate.candidate);
+            sendWebSocketMessage('ice_candidate', {
+                userId: state.user.id,
+                candidate: {
+                    candidate: event.candidate.candidate,
+                    sdpMid: event.candidate.sdpMid,
+                    sdpMLineIndex: event.candidate.sdpMLineIndex,
+                    usernameFragment: event.candidate.usernameFragment
+                }
+            });
+        }
+    };
+
+    // 2. Обработка входящих аудио потоков
+    pc.ontrack = (event) => {
+        console.log('Received remote track:', event.track.id);
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        attachAudioStream(event.track.id, stream);
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log('PeerConnection state:', pc.connectionState);
+        if (pc.connectionState === 'connected') {
+            console.log('WebRTC connection established!');
+        }
+    };
+
+    // 3. Добавляем микрофон
+    if (state.localStream) {
+        state.localStream.getTracks().forEach(track => {
+            pc.addTrack(track, state.localStream);
+        });
+    }
+
+    // 4. Формируем Offer
+    try {
+        const offer = await pc.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: false
+        });
+        await pc.setLocalDescription(offer);
+
+        sendWebSocketMessage('sdp_offer', {
+            userId: state.user.id,
+            offer: offer
+        });
+    } catch (error) {
+        console.error('Failed to create offer:', error);
+    }
+}
+
 async function handleSDPOffer(payload) {
     console.log('Received SDP offer for renegotiation');
-
-    if (!state.peerConnection) {
-        console.warn('No PeerConnection available for SDP offer');
-        return;
-    }
+    if (!state.peerConnection) return;
 
     try {
         await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.offer));
-        console.log('Remote description set for renegotiation');
-
         const answer = await state.peerConnection.createAnswer();
         await state.peerConnection.setLocalDescription(answer);
-        console.log('Sending SDP answer for renegotiation');
 
         sendWebSocketMessage('sdp_answer', {
             userId: state.user.id,
@@ -283,225 +294,80 @@ async function handleSDPOffer(payload) {
 }
 
 async function handleSDPAnswer(payload) {
-    console.log('SDP answer received');
-
-    if (!state.peerConnection) {
-        console.warn('No PeerConnection available for SDP answer');
-        return;
-    }
-
+    if (!state.peerConnection) return;
     try {
-        await state.peerConnection.setRemoteDescription(payload.answer);
-        console.log('Remote description set successfully');
+        await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
+        console.log('Remote SDP Answer set successfully');
     } catch (error) {
         console.error('Failed to set remote description:', error);
     }
 }
 
 async function handleICECandidate(payload) {
-    console.log('ICE candidate received:', payload.candidate);
-
-    if (!state.peerConnection) {
-        console.warn('No PeerConnection available for ICE candidate');
-        return;
-    }
-
-    if (payload.candidate) {
-        try {
-            await state.peerConnection.addIceCandidate(payload.candidate);
-            console.log('ICE candidate added successfully');
-        } catch (error) {
-            console.error('Failed to add ICE candidate:', error);
-        }
-    }
-}
-
-async function createPeerConnection() {
-    console.log('Creating PeerConnection');
-
-    if (state.peerConnection) {
-        state.peerConnection.close();
-        state.peerConnection = null;
-    }
-
-    const peerConnection = new RTCPeerConnection(rtcConfig);
-    state.peerConnection = peerConnection;
-
-    // 1. Добавляем треки микрофона
-    if (state.localStream) {
-        state.localStream.getTracks().forEach(track => {
-            peerConnection.addTrack(track, state.localStream);
-            console.log('Added local track:', track.kind);
-        });
-    }
-
-    // 2. Обработка входящего аудио
-    peerConnection.ontrack = (event) => {
-        console.log('Received remote track:', event.track.kind);
-        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        createAudioElement(event.track, stream);
-    };
-
-    // 3. Отправка Trickle ICE кандидатов
-    peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-            console.log('Sending ICE candidate:', event.candidate.candidate);
-            sendWebSocketMessage('ice_candidate', {
-                userId: state.user.id,
-                candidate: event.candidate.toJSON ? event.candidate.toJSON() : {
-                    candidate: event.candidate.candidate,
-                    sdpMid: event.candidate.sdpMid,
-                    sdpMLineIndex: event.candidate.sdpMLineIndex,
-                    usernameFragment: event.candidate.usernameFragment
-                }
-            });
-        }
-    };
-
-    peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state changed:', peerConnection.connectionState);
-        if (peerConnection.connectionState === 'connected') {
-            console.log('🎉 WebRTC connected!');
-        }
-    };
-
-    peerConnection.oniceconnectionstatechange = () => {
-        console.log('ICE connection state changed:', peerConnection.iceConnectionState);
-    };
-
-    // Отправляем offer сразу
+    if (!state.peerConnection || !payload.candidate) return;
     try {
-        const offer = await peerConnection.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: false
-        });
-        await peerConnection.setLocalDescription(offer);
-
-        console.log('Sending SDP offer immediately');
-        sendWebSocketMessage('sdp_offer', {
-            userId: state.user.id,
-            offer: offer
-        });
+        await state.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
     } catch (error) {
-        console.error('Failed to create offer:', error);
+        console.error('Failed to add remote ICE candidate:', error);
     }
 }
 
-function createAudioElement(track, stream) {
-    console.log('Creating audio element for track:', track.id);
-
-    if (!state.audioContext) {
-        state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+function attachAudioStream(trackId, stream) {
+    let audio = document.getElementById(`audio-${trackId}`);
+    if (!audio) {
+        audio = document.createElement('audio');
+        audio.id = `audio-${trackId}`;
+        audio.autoplay = true;
+        audio.playsInline = true;
+        document.body.appendChild(audio);
     }
-
-    const audioElement = document.createElement('audio');
-    audioElement.autoplay = true;
-    audioElement.srcObject = stream;
-
-    // Создаём усиление для контроля громкости
-    const gainNode = state.audioContext.createGain();
-    const source = state.audioContext.createMediaStreamSource(stream);
-    source.connect(gainNode);
-    gainNode.connect(state.audioContext.destination);
-
-    // Сохраняем ссылки
-    const audioId = `audio-${Date.now()}`;
-    audioElement.id = audioId;
-
-    document.body.appendChild(audioElement);
-
-    console.log('Audio element created:', audioId);
+    audio.srcObject = stream;
+    audio.play().catch(e => console.warn('Autoplay prevented:', e));
 }
 
 function sendWebSocketMessage(type, payload) {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-        const message = {
-            type: type,
-            payload: payload
-        };
-        state.ws.send(JSON.stringify(message));
-    } else {
-        console.warn('WebSocket is not connected');
+        state.ws.send(JSON.stringify({ type, payload }));
     }
 }
 
 function leaveRoom() {
-    console.log('Leaving room');
-
     state.reconnectAttempts = 0;
-
-    // Close WebSocket
-    if (state.ws) {
-        state.ws.close();
-        state.ws = null;
-    }
-
-    // Close PeerConnection
-    if (state.peerConnection) {
-        state.peerConnection.close();
-        state.peerConnection = null;
-    }
-
-    // Stop all tracks
+    if (state.ws) { state.ws.close(); state.ws = null; }
+    if (state.peerConnection) { state.peerConnection.close(); state.peerConnection = null; }
     if (state.localStream) {
-        state.localStream.getTracks().forEach(track => track.stop());
+        state.localStream.getTracks().forEach(t => t.stop());
         state.localStream = null;
     }
 
-    // Clean up audio elements
-    state.participants.forEach((participant, userId) => {
-        if (participant.audioElement) {
-            participant.audioElement.remove();
-        }
-        if (participant.gainNode) {
-            participant.gainNode.disconnect();
-        }
-        if (participant.source) {
-            participant.source.disconnect();
-        }
-    });
-
-    // Clear participants
-    state.participants.clear();
-
-    // Update UI
     elements.connectionPanel.style.display = 'block';
     elements.participantsGrid.style.display = 'none';
     elements.participantsGrid.innerHTML = '';
-
+    state.participants.clear();
     state.isJoined = false;
-    console.log('Left room');
 }
 
 function toggleMute() {
     if (!state.localStream) return;
-
     state.isMuted = !state.isMuted;
-    state.localStream.getAudioTracks().forEach(track => {
-        track.enabled = !state.isMuted;
-    });
-
+    state.localStream.getAudioTracks().forEach(t => { t.enabled = !state.isMuted; });
     elements.micBtn.textContent = state.isMuted ? '🔇' : '🎤';
-    console.log(state.isMuted ? 'Muted' : 'Unmuted');
 }
 
-function openSettings() {
-    elements.settingsModal.style.display = 'flex';
-}
-
-function closeSettings() {
-    elements.settingsModal.style.display = 'none';
-}
+function openSettings() { if (elements.settingsModal) elements.settingsModal.style.display = 'flex'; }
+function closeSettings() { if (elements.settingsModal) elements.settingsModal.style.display = 'none'; }
 
 function addParticipantToUI(user, isSelf = false) {
+    if (state.participants.has(user.id)) return;
+
     const card = document.createElement('div');
     card.className = 'participant-card glass';
     card.id = `participant-${user.id}`;
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    avatar.style.background = user.avatarColor;
-    avatar.textContent = user.name.charAt(0).toUpperCase();
+    avatar.style.background = user.avatarColor || '#7c6cff';
+    avatar.textContent = (user.name || 'U').charAt(0).toUpperCase();
 
     const name = document.createElement('div');
     name.className = 'participant-name';
@@ -509,22 +375,6 @@ function addParticipantToUI(user, isSelf = false) {
 
     card.appendChild(avatar);
     card.appendChild(name);
-
-    // Volume control (не для себя)
-    if (!isSelf) {
-        const volumeControl = document.createElement('input');
-        volumeControl.type = 'range';
-        volumeControl.min = '0';
-        volumeControl.max = '200';
-        volumeControl.value = '100';
-        volumeControl.className = 'volume-control';
-        volumeControl.addEventListener('input', (e) => {
-            // TODO: Применить громкость к конкретному потоку
-            console.log('Volume for', user.id, ':', e.target.value);
-        });
-        card.appendChild(volumeControl);
-    }
-
     elements.participantsGrid.appendChild(card);
     state.participants.set(user.id, { user, card, isSelf });
 }
