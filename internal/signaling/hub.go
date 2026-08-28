@@ -41,7 +41,7 @@ type Hub struct {
 	rooms        map[string]*models.Room
 	clients      map[string]*Client
 	activeTracks map[string]*webrtc.TrackLocalStaticRTP
-	trackOwners  map[string]string // TrackID -> ClientID
+	trackOwners  map[string]string
 	mu           sync.RWMutex
 }
 
@@ -100,10 +100,7 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 	room := models.NewRoom(cfg.RoomName, cfg.MaxUsers)
 	hub.rooms[cfg.RoomName] = room
 
-	log.Info().
-		Str("room", cfg.RoomName).
-		Int("maxUsers", cfg.MaxUsers).
-		Msg("Created default room")
+	log.Info().Str("room", cfg.RoomName).Int("maxUsers", cfg.MaxUsers).Msg("Created default room")
 
 	return hub
 }
@@ -114,6 +111,8 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		h.log.Error().Err(err).Msg("Failed to upgrade WebSocket connection")
 		return
 	}
+
+	h.log.Info().Msg("New WebSocket connection established")
 
 	client := &Client{
 		ID:                "client_" + uuid.New().String(),
@@ -223,6 +222,8 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.User = user
 	c.Room = room
 
+	c.Hub.log.Info().Str("userId", user.ID).Str("userName", user.Name).Msg("User joined room")
+
 	c.sendMessage("room_state", RoomStateMessage{Users: room.GetUsers()})
 
 	for _, client := range c.Hub.getClientsInRoom(room.ID) {
@@ -246,11 +247,10 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 	c.PeerConn = peerConn
 	c.mu.Unlock()
 
-	// Добавляем существующие активные треки ДО генерации ответа
 	c.Hub.mu.RLock()
 	for trackID, track := range c.Hub.activeTracks {
 		ownerID := c.Hub.trackOwners[trackID]
-		if ownerID != c.ID { // Не отправляем пользователю его же звук
+		if ownerID != c.ID {
 			c.PeerConn.AddTrack(track)
 		}
 	}
@@ -269,7 +269,6 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		return
 	}
 
-	// Применяем ICE-кандидаты, которые успели прийти в буфер
 	c.mu.Lock()
 	for _, cand := range c.pendingCandidates {
 		peerConn.AddICECandidate(cand)
@@ -296,7 +295,6 @@ func (c *Client) handleICECandidate(msg ICECandidateMessage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Если SDP еще не установлен, складываем в буфер
 	if c.PeerConn == nil || c.PeerConn.RemoteDescription() == nil {
 		c.pendingCandidates = append(c.pendingCandidates, msg.Candidate)
 		return
@@ -328,7 +326,6 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
-	// На сервере оставляем ICEServers пустым (он за статическим IP)
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{},
 	}
@@ -338,7 +335,14 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		return nil, err
 	}
 
-	// Отправка кандидатов от сервера клиенту
+	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		h.log.Info().Str("clientId", client.ID).Str("state", state.String()).Msg("PeerConnection state")
+	})
+
+	peerConn.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		h.log.Info().Str("clientId", client.ID).Str("state", state.String()).Msg("ICE connection state")
+	})
+
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			client.sendMessage("ice_candidate", ICECandidateMessage{
@@ -348,7 +352,6 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		}
 	})
 
-	// Обработка аудио, которое клиент отправляет на сервер
 	peerConn.OnTrack(func(remoteTrack *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		h.log.Info().Str("clientId", client.ID).Msg("Received track from client")
 
@@ -366,17 +369,14 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		h.trackOwners[localTrack.ID()] = client.ID
 		h.mu.Unlock()
 
-		// Раздаем этот новый трек всем уже подключенным участникам
 		for _, otherClient := range h.getClientsInRoom(client.Room.ID) {
 			if otherClient.ID != client.ID && otherClient.PeerConn != nil {
 				if _, err := otherClient.PeerConn.AddTrack(localTrack); err == nil {
-					// Триггерим пересогласование для старых клиентов, чтобы они услышали нового
 					go h.renegotiateClient(otherClient)
 				}
 			}
 		}
 
-		// Цикл чтения пакетов (Fan-out)
 		go func() {
 			defer func() {
 				h.mu.Lock()
@@ -402,7 +402,7 @@ func (h *Hub) renegotiateClient(client *Client) {
 	defer client.mu.Unlock()
 
 	if client.PeerConn == nil || client.PeerConn.SignalingState() != webrtc.SignalingStateStable {
-		return // Защита от спама Renegotiation
+		return
 	}
 
 	offer, err := client.PeerConn.CreateOffer(nil)
@@ -458,10 +458,11 @@ func (h *Hub) getClientsInRoom(roomID string) []*Client {
 }
 
 func (h *Hub) removeClient(client *Client) {
+	h.log.Info().Str("clientId", client.ID).Msg("Client disconnected")
+
 	h.mu.Lock()
 	delete(h.clients, client.ID)
 
-	// Очищаем треки отключившегося клиента
 	for trackID, ownerID := range h.trackOwners {
 		if ownerID == client.ID {
 			delete(h.activeTracks, trackID)

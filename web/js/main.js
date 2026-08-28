@@ -10,7 +10,7 @@ const state = {
     isMuted: false,
     reconnectAttempts: 0,
     maxReconnectAttempts: 3,
-    pendingCandidates: [] // Буфер для кандидатов от сервера
+    pendingCandidates: []
 };
 
 const rtcConfig = {
@@ -223,23 +223,21 @@ async function createPeerConnection() {
     const pc = new RTCPeerConnection(rtcConfig);
     state.peerConnection = pc;
 
-    // Сразу добавляем локальный микрофон
     if (state.localStream) {
         state.localStream.getTracks().forEach(track => {
             pc.addTrack(track, state.localStream);
         });
     }
 
-    // Обработка удаленных аудио-треков
     pc.ontrack = (event) => {
         console.log('Received remote track:', event.track.id);
         const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
         attachAudioStream(event.track.id, stream);
     };
 
-    // Отправка локальных кандидатов
     pc.onicecandidate = (event) => {
         if (event.candidate) {
+            console.log('Generated local candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
                 candidate: {
@@ -255,17 +253,17 @@ async function createPeerConnection() {
     pc.onconnectionstatechange = () => {
         console.log('PeerConnection state:', pc.connectionState);
         if (pc.connectionState === 'connected') {
-            console.log('🎉 WebRTC connection successfully established!');
+            console.log('🎉 WebRTC connection established successfully!');
         }
     };
 
-    // Создаем Offer и сразу отправляем
     try {
         const offer = await pc.createOffer({
             offerToReceiveAudio: true,
             offerToReceiveVideo: false
         });
         await pc.setLocalDescription(offer);
+        console.log('Sending SDP offer immediately');
 
         sendWebSocketMessage('sdp_offer', {
             userId: state.user.id,
@@ -276,7 +274,6 @@ async function createPeerConnection() {
     }
 }
 
-// Обработка SDP Offer от сервера (при появлении новых треков)
 async function handleSDPOffer(payload) {
     console.log('Received SDP offer for renegotiation');
     if (!state.peerConnection) return;
@@ -297,30 +294,31 @@ async function handleSDPOffer(payload) {
     }
 }
 
-// Обработка SDP Answer от сервера (ответ на наш первоначальный Offer)
 async function handleSDPAnswer(payload) {
     console.log('Received SDP answer from server');
     if (!state.peerConnection) return;
 
     try {
         await state.peerConnection.setRemoteDescription(new RTCSessionDescription(payload.answer));
+        console.log('Remote SDP Answer set successfully');
         flushPendingCandidates();
     } catch (error) {
         console.error('Failed to set remote description:', error);
     }
 }
 
-// Обработка входящих кандидатов от сервера
 async function handleICECandidate(payload) {
     if (!payload.candidate) return;
 
     if (!state.peerConnection || !state.peerConnection.remoteDescription) {
         state.pendingCandidates.push(payload.candidate);
+        console.log('Queued ICE candidate from server');
         return;
     }
 
     try {
         await state.peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        console.log('Added ICE candidate from server');
     } catch (error) {
         console.error('Failed to add remote ICE candidate:', error);
     }
@@ -331,12 +329,12 @@ async function flushPendingCandidates() {
         for (const candidate of state.pendingCandidates) {
             try {
                 await state.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log('Flushed and added pending ICE candidate');
             } catch (e) {
                 console.error('Failed to flush candidate:', e);
             }
         }
         state.pendingCandidates = [];
-        console.log('Flushed pending ICE candidates');
     }
 }
 
