@@ -323,70 +323,61 @@ async function createPeerConnection() {
     const peerConnection = new RTCPeerConnection(rtcConfig);
     state.peerConnection = peerConnection;
 
-    // 1. Привязываем микрофонный трек явно через Transceiver (критично для Safari/iOS)
+    // Добавляем трек микрофона
     if (state.localStream) {
         state.localStream.getTracks().forEach(track => {
-            peerConnection.addTransceiver(track, {
-                direction: 'sendrecv',
-                streams: [state.localStream]
-            });
-            console.log('Added local track to transceiver:', track.kind);
+            peerConnection.addTrack(track, state.localStream);
+            console.log('Added local track:', track.kind);
         });
     }
 
-    // 2. Обработка входящего звука от других участников
+    // Обработка удаленного аудио
     peerConnection.ontrack = (event) => {
         console.log('Received remote track:', event.track.kind);
-        if (event.streams && event.streams[0]) {
-            createAudioElement(event.track, event.streams[0]);
-        } else {
-            const inboundStream = new MediaStream([event.track]);
-            createAudioElement(event.track, inboundStream);
-        }
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        createAudioElement(event.track, stream);
     };
 
-    // 3. Передача кандидатов на сервер
+    // Отправка ICE кандидатов
     peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
             console.log('Sending ICE candidate:', event.candidate.candidate);
             sendWebSocketMessage('ice_candidate', {
                 userId: state.user.id,
-                candidate: {
+                candidate: event.candidate.toJSON ? event.candidate.toJSON() : {
                     candidate: event.candidate.candidate,
                     sdpMid: event.candidate.sdpMid,
                     sdpMLineIndex: event.candidate.sdpMLineIndex,
                     usernameFragment: event.candidate.usernameFragment
                 }
             });
-        } else {
-            console.log('ICE gathering completed');
         }
     };
 
     peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', peerConnection.connectionState);
+        console.log('Connection state changed:', peerConnection.connectionState);
         if (peerConnection.connectionState === 'connected') {
-            console.log('WebRTC connection established!');
+            console.log('🎉 WebRTC connection successfully established!');
         }
     };
 
     peerConnection.oniceconnectionstatechange = () => {
-        console.log('ICE connection state:', peerConnection.iceConnectionState);
+        console.log('ICE state changed:', peerConnection.iceConnectionState);
     };
 
-    // 4. Формируем Offer
     try {
         const offer = await peerConnection.createOffer({
             offerToReceiveAudio: true,
             offerToReceiveVideo: false
         });
         await peerConnection.setLocalDescription(offer);
-        console.log('Sending SDP offer');
 
+        // Отправляем offer на сервер
         sendWebSocketMessage('sdp_offer', {
             userId: state.user.id,
-            offer: offer
+            offer: peerConnection.localDescription
         });
+        console.log('Sent local SDP offer');
     } catch (error) {
         console.error('Failed to create offer:', error);
     }
