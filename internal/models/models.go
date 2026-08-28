@@ -1,11 +1,11 @@
 package models
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/pion/webrtc/v3"
 )
 
 type User struct {
