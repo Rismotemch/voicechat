@@ -25,7 +25,7 @@ const rtcConfig = {
         },
         {
             urls: [
-                'turn:voice.repozis.ru:3478',
+                'turn:voice.repozis.ru:3478?transport=udp',
                 'turn:voice.repozis.ru:3478?transport=tcp'
             ],
             username: 'voicechat',
@@ -33,7 +33,8 @@ const rtcConfig = {
         }
     ],
     iceCandidatePoolSize: 10,
-    iceTransportPolicy: 'all'
+    // Временно для теста можно поставить 'relay', чтобы жестко проверить TURN:
+    // iceTransportPolicy: 'relay'
 };
 
 // DOM элементы

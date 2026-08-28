@@ -464,17 +464,16 @@ func (h *Hub) removeClient(client *Client) {
 }
 
 func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, error) {
-	// Создаём SettingEngine для настройки сети
 	settingEngine := webrtc.SettingEngine{}
 
-	// Настройка UDP портов
+	// 1. Ограничение пула UDP портов
 	if h.cfg.UDPMin > 0 && h.cfg.UDPMax > 0 {
 		if err := settingEngine.SetEphemeralUDPPortRange(uint16(h.cfg.UDPMin), uint16(h.cfg.UDPMax)); err != nil {
 			h.log.Error().Err(err).Msg("Failed to set UDP port range")
 		}
 	}
 
-	// Если есть домен, резолвим его в IP для NAT
+	// 2. Динамический резолв домена в текущий публичный IP
 	if h.cfg.Domain != "" && h.cfg.Domain != "localhost" {
 		ips, err := net.LookupIP(h.cfg.Domain)
 		if err == nil && len(ips) > 0 {
@@ -487,45 +486,28 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 			if len(ipStrings) > 0 {
 				h.log.Info().
 					Strs("ips", ipStrings).
-					Msg("Setting NAT 1-to-1 IPs from domain")
+					Msg("Setting NAT 1-to-1 IPs dynamically from domain")
 				settingEngine.SetNAT1To1IPs(ipStrings, webrtc.ICECandidateTypeHost)
 			}
+		} else {
+			h.log.Warn().Err(err).Str("domain", h.cfg.Domain).Msg("Failed to resolve dynamic domain IP")
 		}
 	}
 
-	// Создаём API с настройками
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine))
 
-	// Создаём ICE серверы
-	var iceServers []webrtc.ICEServer
-
-	// Добавляем STUN серверы
-	if len(h.cfg.STUNServers) > 0 {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs: h.cfg.STUNServers,
-		})
-	}
-
-	// Добавляем TURN серверы
-	if len(h.cfg.TURNServers) > 0 {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:       h.cfg.TURNServers,
-			Username:   "voicechat",
-			Credential: "voicechat123",
-		})
-	}
-
+	// 3. Серверу НЕ передаем ICEServers (STUN/TURN нужны только браузерам)
+	// Это исключает появление паразитных локальных srflx (192.168.1.1)
 	config := webrtc.Configuration{
-		ICEServers: iceServers,
+		ICEServers: []webrtc.ICEServer{},
 	}
 
-	// Создаём PeerConnection через API
 	peerConn, err := api.NewPeerConnection(config)
 	if err != nil {
 		return nil, err
 	}
 
-	// Обработка ICE кандидатов
+	// 4. Обработка ICE кандидатов от Pion к клиенту
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
 			h.log.Debug().
@@ -541,20 +523,18 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		}
 	})
 
-	// Обработка входящих треков
+	// 5. Обработка входящих аудио-треков
 	peerConn.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		h.log.Info().
 			Str("clientId", client.ID).
 			Str("trackID", track.ID()).
-			Str("streamID", track.StreamID()).
 			Str("codec", track.Codec().MimeType).
-			Msg("Received track")
+			Msg("Received remote track from client")
 
-		// Пересылаем трек всем остальным
 		h.forwardTrack(client, track)
 	})
 
-	// Логирование состояния соединения
+	// Логирование состояний
 	peerConn.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		h.log.Debug().
 			Str("clientId", client.ID).
@@ -562,7 +542,6 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 			Msg("PeerConnection state changed")
 	})
 
-	// Логирование ICE состояния
 	peerConn.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		h.log.Debug().
 			Str("clientId", client.ID).
