@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   voicechat:
-    image: rismotemch/voicechat:latest
+    image: rism0/voicechat:latest
     container_name: voicechat
     restart: unless-stopped
     network_mode: host
