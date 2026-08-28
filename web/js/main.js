@@ -15,9 +15,12 @@ const state = {
 
 const rtcConfig = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:voice.repozis.ru:3478' },
+        {
+            urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302'
+            ]
+        },
         {
             urls: [
                 'turn:voice.repozis.ru:3478?transport=udp',
@@ -29,7 +32,8 @@ const rtcConfig = {
     ],
     iceCandidatePoolSize: 10,
     bundlePolicy: 'max-bundle',
-    rtcpMuxPolicy: 'require'
+    rtcpMuxPolicy: 'require',
+    iceTransportPolicy: 'all'
 };
 
 const elements = {
@@ -347,11 +351,11 @@ function attachAudioStream(trackId, stream) {
         audio.playsInline = true;
         document.body.appendChild(audio);
     }
-    
+
     if (audio.srcObject !== stream) {
         audio.srcObject = stream;
     }
-    
+
     audio.play().catch(e => {
         console.warn('Autoplay prevented, requires user interaction:', e);
     });
