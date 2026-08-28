@@ -18,30 +18,21 @@ const rtcConfig = {
         {
             urls: [
                 'stun:stun.l.google.com:19302',
-                'stun:stun1.l.google.com:19302',
-                'stun:stun.services.mozilla.com:3478'
+                'stun:stun1.l.google.com:19302'
             ]
         },
         {
-            urls: [
-                'turn:voice.repozis.ru:3478?transport=udp',
-                'turn:voice.repozis.ru:3478?transport=tcp'
-            ],
+            urls: 'turn:voice.repozis.ru:3478?transport=udp',
             username: 'voicechat',
             credential: 'voicechat123'
         },
-        // Добавляем публичные TURN серверы как запасные
         {
-            urls: [
-                'turn:openrelay.metered.ca:80',
-                'turn:openrelay.metered.ca:443',
-                'turn:openrelay.metered.ca:443?transport=tcp'
-            ],
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
+            urls: 'turn:voice.repozis.ru:3478?transport=tcp',
+            username: 'voicechat',
+            credential: 'voicechat123'
         }
     ],
-    iceCandidatePoolSize: 10,
+    iceCandidatePoolSize: 0,
     bundlePolicy: 'max-bundle',
     rtcpMuxPolicy: 'require',
     iceTransportPolicy: 'all'
