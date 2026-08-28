@@ -481,3 +481,25 @@ func (h *Hub) removeClient(client *Client) {
 		client.PeerConn.Close()
 	}
 }
+
+func (h *Hub) GetRoomUserCount() int {
+	room := h.getRoom()
+	if room == nil {
+		return 0
+	}
+	return room.Count()
+}
+
+func (h *Hub) Close() {
+	h.log.Info().Msg("Closing signaling hub")
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clients {
+		if client.PeerConn != nil {
+			client.PeerConn.Close()
+		}
+		client.Conn.Close()
+	}
+}
