@@ -498,6 +498,25 @@ func (h *Hub) createPeerConnection(client *Client) (*webrtc.PeerConnection, erro
 		return nil, err
 	}
 
+	// Логирование всех ICE кандидатов
+peerConn.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+    h.log.Info().
+        Str("clientId", client.ID).
+        Str("gatheringState", state.String()).
+        Msg("ICE gathering state changed")
+})
+
+	// Логирование выбранной пары кандидатов
+	peerConn.OnICECandidatePairChange(func(pair *webrtc.ICECandidatePair) {
+   	if pair != nil {
+        h.log.Info().
+            Str("clientId", client.ID).
+            Str("localCandidate", pair.Local.String()).
+            Str("remoteCandidate", pair.Remote.String()).
+            Msg("ICE candidate pair selected")
+    	}
+	})
+
 	// Обработка ICE кандидатов
 	peerConn.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {

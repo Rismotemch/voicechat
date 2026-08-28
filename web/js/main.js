@@ -10,14 +10,22 @@ const state = {
     isJoined: false,
     isMuted: false,
     reconnectAttempts: 0,
-    maxReconnectAttempts: 3
+    maxReconnectAttempts: 3,
+    pendingCandidates: []
 };
 
 // WebRTC configuration
 const rtcConfig = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
-    ]
+        { 
+            urls: [
+                'stun:stun.l.google.com:19302',
+                'stun:stun1.l.google.com:19302'
+            ] 
+        }
+    ],
+    iceCandidatePoolSize: 10,
+    iceTransportPolicy: 'all'
 };
 
 // DOM элементы
@@ -75,7 +83,9 @@ async function joinRoom() {
             audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
-                autoGainControl: true
+                autoGainControl: true,
+                channelCount: 1,
+                sampleRate: 48000
             },
             video: false
         });
@@ -268,6 +278,15 @@ async function handleSDPAnswer(payload) {
     try {
         await state.peerConnection.setRemoteDescription(payload.answer);
         console.log('Remote description set successfully');
+        
+        // Добавляем отложенные ICE кандидаты
+        if (state.pendingCandidates.length > 0) {
+            console.log('Adding pending ICE candidates:', state.pendingCandidates.length);
+            for (const candidate of state.pendingCandidates) {
+                await state.peerConnection.addIceCandidate(candidate);
+            }
+            state.pendingCandidates = [];
+        }
     } catch (error) {
         console.error('Failed to set remote description:', error);
     }
@@ -283,6 +302,13 @@ async function handleICECandidate(payload) {
     
     if (payload.candidate) {
         try {
+            // Если remote description ещё не установлен, сохраняем кандидата
+            if (!state.peerConnection.remoteDescription) {
+                console.log('Remote description not set yet, saving candidate');
+                state.pendingCandidates.push(payload.candidate);
+                return;
+            }
+            
             await state.peerConnection.addIceCandidate(payload.candidate);
             console.log('ICE candidate added successfully');
         } catch (error) {
@@ -299,6 +325,9 @@ async function createPeerConnection() {
         state.peerConnection.close();
         state.peerConnection = null;
     }
+    
+    // Очищаем отложенные кандидаты
+    state.pendingCandidates = [];
     
     // Создаём новое RTCPeerConnection
     const peerConnection = new RTCPeerConnection(rtcConfig);
@@ -331,17 +360,25 @@ async function createPeerConnection() {
                 userId: state.user.id,
                 candidate: event.candidate
             });
+        } else {
+            console.log('ICE gathering completed');
         }
     };
     
     // Логирование состояния соединения
     peerConnection.onconnectionstatechange = () => {
         console.log('Connection state:', peerConnection.connectionState);
+        if (peerConnection.connectionState === 'connected') {
+            console.log('WebRTC connection established!');
+        }
     };
     
     // Логирование состояния ICE
     peerConnection.oniceconnectionstatechange = () => {
         console.log('ICE connection state:', peerConnection.iceConnectionState);
+        if (peerConnection.iceConnectionState === 'connected') {
+            console.log('ICE connection established!');
+        }
     };
     
     // Логирование состояния ICE gathering
@@ -356,7 +393,10 @@ async function createPeerConnection() {
     
     // Создаём offer
     try {
-        const offer = await peerConnection.createOffer();
+        const offer = await peerConnection.createOffer({
+            offerToReceiveAudio: true,
+            offerToReceiveVideo: false
+        });
         await peerConnection.setLocalDescription(offer);
         console.log('Sending SDP offer');
         
