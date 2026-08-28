@@ -369,7 +369,7 @@ async function createPeerConnection() {
         console.log('ICE connection state changed:', peerConnection.iceConnectionState);
     };
 
-    // 4. Создаем Offer и ждем сбор всех ICE кандидатов (включая STUN srflx)
+    // Отправляем offer сразу
     try {
         const offer = await peerConnection.createOffer({
             offerToReceiveAudio: true,
@@ -377,26 +377,10 @@ async function createPeerConnection() {
         });
         await peerConnection.setLocalDescription(offer);
 
-        // Ждем сбор STUN кандидатов (максимум 800мс)
-        await new Promise((resolve) => {
-            if (peerConnection.iceGatheringState === 'complete') {
-                resolve();
-            } else {
-                const checkState = () => {
-                    if (peerConnection.iceGatheringState === 'complete') {
-                        peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                        resolve();
-                    }
-                };
-                peerConnection.addEventListener('icegatheringstatechange', checkState);
-                setTimeout(resolve, 800); // Таймаут на случай медленного STUN
-            }
-        });
-
-        console.log('Sending gathered SDP offer');
+        console.log('Sending SDP offer immediately');
         sendWebSocketMessage('sdp_offer', {
             userId: state.user.id,
-            offer: peerConnection.localDescription
+            offer: offer
         });
     } catch (error) {
         console.error('Failed to create offer:', error);

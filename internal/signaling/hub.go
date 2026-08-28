@@ -24,15 +24,16 @@ var upgrader = websocket.Upgrader{
 }
 
 type Client struct {
-	ID          string
-	User        *models.User
-	Room        *models.Room
-	Conn        *websocket.Conn
-	Send        chan []byte
-	Hub         *Hub
-	PeerConn    *webrtc.PeerConnection
-	localTracks map[string]*webrtc.TrackLocalStaticRTP
-	mu          sync.RWMutex
+	ID                string
+	User              *models.User
+	Room              *models.Room
+	Conn              *websocket.Conn
+	Send              chan []byte
+	Hub               *Hub
+	PeerConn          *webrtc.PeerConnection
+	localTracks       map[string]*webrtc.TrackLocalStaticRTP
+	pendingCandidates []webrtc.ICECandidateInit
+	mu                sync.RWMutex
 }
 
 type Hub struct {
@@ -145,11 +146,12 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.log.Info().Msg("New WebSocket connection established")
 
 	client := &Client{
-		ID:          generateID(),
-		Conn:        conn,
-		Send:        make(chan []byte, 256),
-		Hub:         h,
-		localTracks: make(map[string]*webrtc.TrackLocalStaticRTP),
+		ID:                generateID(),
+		Conn:              conn,
+		Send:              make(chan []byte, 256),
+		Hub:               h,
+		localTracks:       make(map[string]*webrtc.TrackLocalStaticRTP),
+		pendingCandidates: make([]webrtc.ICECandidateInit, 0),
 	}
 
 	h.mu.Lock()
@@ -311,12 +313,10 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		Str("userId", msg.UserID).
 		Msg("Received SDP offer")
 
-	// Закрываем старое соединение если есть
 	if c.PeerConn != nil {
 		c.PeerConn.Close()
 	}
 
-	// Создаём новое PeerConnection
 	peerConn, err := c.Hub.createPeerConnection(c)
 	if err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to create PeerConnection")
@@ -324,16 +324,24 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		return
 	}
 
+	c.mu.Lock()
 	c.PeerConn = peerConn
 
-	// Устанавливаем remote description
+	// Применяем все кандидаты, которые пришли до SDP Offer
+	for _, cand := range c.pendingCandidates {
+		if err := c.PeerConn.AddICECandidate(cand); err != nil {
+			c.Hub.log.Error().Err(err).Msg("Failed to add buffered ICE candidate")
+		}
+	}
+	c.pendingCandidates = nil
+	c.mu.Unlock()
+
 	if err := peerConn.SetRemoteDescription(msg.Offer); err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to set remote description")
 		c.sendError("Failed to set remote description")
 		return
 	}
 
-	// Создаём answer
 	answer, err := peerConn.CreateAnswer(nil)
 	if err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to create answer")
@@ -341,14 +349,12 @@ func (c *Client) handleSDPOffer(msg SDPOfferMessage) {
 		return
 	}
 
-	// Устанавливаем local description
 	if err := peerConn.SetLocalDescription(answer); err != nil {
 		c.Hub.log.Error().Err(err).Msg("Failed to set local description")
 		c.sendError("Failed to set local description")
 		return
 	}
 
-	// Отправляем answer
 	answerMsg := SDPAnswerMessage{
 		UserID: msg.UserID,
 		Answer: answer,
@@ -371,13 +377,16 @@ func (c *Client) handleSDPAnswer(msg SDPAnswerMessage) {
 }
 
 func (c *Client) handleICECandidate(msg ICECandidateMessage) {
-	c.Hub.log.Debug().
-		Str("clientId", c.ID).
-		Str("candidate", msg.Candidate.Candidate).
-		Msg("Received ICE candidate from client")
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	// Если PeerConnection еще не создан, сохраняем в очередь
 	if c.PeerConn == nil {
-		c.Hub.log.Warn().Str("clientId", c.ID).Msg("PeerConn is nil, dropping candidate")
+		c.Hub.log.Debug().
+			Str("clientId", c.ID).
+			Str("candidate", msg.Candidate.Candidate).
+			Msg("PeerConn is nil, queuing ICE candidate")
+		c.pendingCandidates = append(c.pendingCandidates, msg.Candidate)
 		return
 	}
 
