@@ -1,10 +1,9 @@
-// Проверяем, не загружен ли уже скрипт
+// Глобальное состояние
 if (window.voiceChatApp) {
     console.warn('VoiceChat app already loaded');
 } else {
     window.voiceChatApp = true;
 
-    // Глобальное состояние
     const state = {
         ws: null,
         user: null,
@@ -14,11 +13,16 @@ if (window.voiceChatApp) {
         audioContext: null,
         audioProcessor: null,
         microphoneStream: null,
+        noiseFilter: null,
+        compressor: null,
+        analyser: null,
         reconnectAttempts: 0,
-        maxReconnectAttempts: 3
+        maxReconnectAttempts: 3,
+        volumeLevels: new Map(), // Громкость для каждого пользователя
+        speakingThreshold: 0.01, // Порог для определения речи
+        speakingUsers: new Set() // Пользователи, которые сейчас говорят
     };
 
-    // DOM элементы
     const elements = {
         connectionPanel: document.getElementById('connectionPanel'),
         participantsGrid: document.getElementById('participantsGrid'),
@@ -31,42 +35,25 @@ if (window.voiceChatApp) {
         closeSettingsBtn: document.getElementById('closeSettingsBtn')
     };
 
-    // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         loadUserFromStorage();
     });
 
     function setupEventListeners() {
-        if (elements.joinBtn) {
-            elements.joinBtn.addEventListener('click', joinRoom);
-        }
-        if (elements.micBtn) {
-            elements.micBtn.addEventListener('click', toggleMute);
-        }
-        if (elements.leaveBtn) {
-            elements.leaveBtn.addEventListener('click', leaveRoom);
-        }
-        if (elements.settingsBtn) {
-            elements.settingsBtn.addEventListener('click', openSettings);
-        }
-        if (elements.closeSettingsBtn) {
-            elements.closeSettingsBtn.addEventListener('click', closeSettings);
-        }
-        if (elements.userName) {
-            elements.userName.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') {
-                    joinRoom();
-                }
-            });
-        }
+        if (elements.joinBtn) elements.joinBtn.addEventListener('click', joinRoom);
+        if (elements.micBtn) elements.micBtn.addEventListener('click', toggleMute);
+        if (elements.leaveBtn) elements.leaveBtn.addEventListener('click', leaveRoom);
+        if (elements.settingsBtn) elements.settingsBtn.addEventListener('click', openSettings);
+        if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', closeSettings);
+        if (elements.userName) elements.userName.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') joinRoom();
+        });
     }
 
     function loadUserFromStorage() {
         const savedName = localStorage.getItem('voicechat_username');
-        if (savedName && elements.userName) {
-            elements.userName.value = savedName;
-        }
+        if (savedName && elements.userName) elements.userName.value = savedName;
     }
 
     async function initAudioContext() {
@@ -85,33 +72,88 @@ if (window.voiceChatApp) {
     async function startMicrophone() {
         await initAudioContext();
 
+        // Захватываем микрофон с улучшенными настройками
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true,
                 channelCount: 1,
-                sampleRate: 48000
+                sampleRate: 48000,
+                latency: 0.01
             },
             video: false
         });
 
         const source = state.audioContext.createMediaStreamSource(state.microphoneStream);
+
+        // Создаём фильтр шумоподавления (высокочастотный фильтр для удаления низкочастотного шума)
+        const highpassFilter = state.audioContext.createBiquadFilter();
+        highpassFilter.type = 'highpass';
+        highpassFilter.frequency.value = 80; // Убираем гул ниже 80 Гц
+
+        // Создаём компрессор для AGC
+        const compressor = state.audioContext.createDynamicsCompressor();
+        compressor.threshold.value = -24;
+        compressor.knee.value = 30;
+        compressor.ratio.value = 12;
+        compressor.attack.value = 0.003;
+        compressor.release.value = 0.25;
+
+        // Создаём анализатор для определения уровня громкости
+        const analyser = state.audioContext.createAnalyser();
+        analyser.fftSize = 256;
+
+        // Создаём обработчик аудио
         state.audioProcessor = state.audioContext.createScriptProcessor(2048, 1, 1);
 
         state.audioProcessor.onaudioprocess = (event) => {
             if (state.isJoined && !state.isMuted) {
                 const audioData = event.inputBuffer.getChannelData(0);
-                const pcmData = floatToPCM16(audioData);
 
-                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                    state.ws.send(pcmData);
+                // Проверяем уровень громкости для VAD
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyser.getByteTimeDomainData(dataArray);
+
+                let sum = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const value = (dataArray[i] - 128) / 128;
+                    sum += value * value;
+                }
+                const rms = Math.sqrt(sum / bufferLength);
+
+                // VAD: если звук тише порога, отправляем тишину
+                if (rms < state.speakingThreshold) {
+                    // Отправляем пакет тишины (меньшего размера)
+                    const silenceData = new Int16Array(256); // 256 сэмплов тишины
+                    const pcmData = silenceData.buffer;
+
+                    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                        state.ws.send(pcmData);
+                    }
+                } else {
+                    // Отправляем звук
+                    const pcmData = floatToPCM16(audioData);
+
+                    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                        state.ws.send(pcmData);
+                    }
                 }
             }
         };
 
-        source.connect(state.audioProcessor);
+        // Подключаем цепочку: source → highpass → compressor → analyser → processor
+        source.connect(highpassFilter);
+        highpassFilter.connect(compressor);
+        compressor.connect(analyser);
+        analyser.connect(state.audioProcessor);
         state.audioProcessor.connect(state.audioContext.destination);
+
+        // Сохраняем ссылки
+        state.noiseFilter = highpassFilter;
+        state.compressor = compressor;
+        state.analyser = analyser;
     }
 
     function floatToPCM16(float32Array) {
@@ -123,7 +165,7 @@ if (window.voiceChatApp) {
         return pcm16.buffer;
     }
 
-    function playRemoteAudio(pcmData) {
+    function playRemoteAudio(userId, pcmData) {
         if (!state.audioContext) return;
 
         const int16Array = new Int16Array(pcmData);
@@ -133,13 +175,43 @@ if (window.voiceChatApp) {
             float32Array[i] = int16Array[i] / 32768.0;
         }
 
+        // Проверяем, говорит ли пользователь
+        const rms = Math.sqrt(float32Array.reduce((sum, val) => sum + val * val, 0) / float32Array.length);
+        if (rms > state.speakingThreshold) {
+            state.speakingUsers.add(userId);
+            updateSpeakingIndicator(userId, true);
+        } else {
+            state.speakingUsers.delete(userId);
+            updateSpeakingIndicator(userId, false);
+        }
+
+        // Применяем индивидуальную громкость
+        const volume = state.volumeLevels.get(userId) || 1.0;
+
         const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, 48000);
         audioBuffer.getChannelData(0).set(float32Array);
 
         const source = state.audioContext.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(state.audioContext.destination);
+
+        // Создаём gain node для контроля громкости
+        const gainNode = state.audioContext.createGain();
+        gainNode.gain.value = volume;
+
+        source.connect(gainNode);
+        gainNode.connect(state.audioContext.destination);
         source.start();
+    }
+
+    function updateSpeakingIndicator(userId, isSpeaking) {
+        const card = document.getElementById(`participant-${userId}`);
+        if (card) {
+            if (isSpeaking) {
+                card.classList.add('speaking');
+            } else {
+                card.classList.remove('speaking');
+            }
+        }
     }
 
     function stopMicrophone() {
@@ -147,6 +219,9 @@ if (window.voiceChatApp) {
             state.audioProcessor.disconnect();
             state.audioProcessor = null;
         }
+        if (state.noiseFilter) state.noiseFilter = null;
+        if (state.compressor) state.compressor = null;
+        if (state.analyser) state.analyser = null;
 
         if (state.microphoneStream) {
             state.microphoneStream.getTracks().forEach(track => track.stop());
@@ -198,13 +273,11 @@ if (window.voiceChatApp) {
 
             state.ws.onopen = () => {
                 console.log('WebSocket connected');
-
                 sendJSONMessage('join', {
                     userId: state.user.id,
                     userName: state.user.name,
                     avatarColor: state.user.avatarColor
                 });
-
                 resolve();
             };
 
@@ -212,7 +285,8 @@ if (window.voiceChatApp) {
                 if (typeof event.data === 'string') {
                     handleJSONMessage(event.data);
                 } else if (event.data instanceof ArrayBuffer) {
-                    playRemoteAudio(event.data);
+                    // Не знаем, от кого пришли данные, используем 'remote'
+                    playRemoteAudio('remote', event.data);
                 }
             };
 
@@ -225,10 +299,7 @@ if (window.voiceChatApp) {
                 console.log('WebSocket disconnected');
                 if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
                     state.reconnectAttempts++;
-                    console.log(`Reconnecting... Attempt ${state.reconnectAttempts}`);
-                    setTimeout(() => {
-                        connectWebSocket().catch(console.error);
-                    }, 2000);
+                    setTimeout(() => connectWebSocket().catch(console.error), 2000);
                 } else if (state.isJoined) {
                     leaveRoom();
                 }
@@ -239,28 +310,19 @@ if (window.voiceChatApp) {
     function handleJSONMessage(data) {
         try {
             const message = JSON.parse(data);
-            console.log('Received message:', message.type);
-
             switch (message.type) {
                 case 'room_state':
                     handleRoomState(message.payload);
                     break;
-
                 case 'user_joined':
                     handleUserJoined(message.payload);
                     break;
-
                 case 'user_left':
                     handleUserLeft(message.payload);
                     break;
-
                 case 'error':
                     console.error('Server error:', message.payload.message);
-                    alert('Ошибка: ' + message.payload.message);
                     break;
-
-                default:
-                    console.warn('Unknown message type:', message.type);
             }
         } catch (error) {
             console.error('Failed to parse message:', error);
@@ -268,8 +330,6 @@ if (window.voiceChatApp) {
     }
 
     function handleRoomState(payload) {
-        console.log('Room state:', payload);
-
         if (payload.users) {
             payload.users.forEach(user => {
                 if (user.id !== state.user.id) {
@@ -280,16 +340,12 @@ if (window.voiceChatApp) {
     }
 
     function handleUserJoined(payload) {
-        console.log('User joined:', payload.user);
-
         if (payload.user && payload.user.id !== state.user.id) {
             addParticipantToUI(payload.user, false);
         }
     }
 
     function handleUserLeft(payload) {
-        console.log('User left:', payload.userId);
-
         const participant = state.participants.get(payload.userId);
         if (participant) {
             participant.card.remove();
@@ -299,65 +355,38 @@ if (window.voiceChatApp) {
 
     function sendJSONMessage(type, payload) {
         if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-            const message = {
-                type: type,
-                payload: payload
-            };
-            state.ws.send(JSON.stringify(message));
+            state.ws.send(JSON.stringify({ type, payload }));
         }
     }
 
     function leaveRoom() {
-        console.log('Leaving room');
-
         state.reconnectAttempts = 0;
-
-        if (state.ws) {
-            state.ws.close();
-            state.ws = null;
-        }
-
+        if (state.ws) { state.ws.close(); state.ws = null; }
         stopMicrophone();
-
         state.participants.clear();
-
         elements.connectionPanel.style.display = 'block';
         elements.participantsGrid.style.display = 'none';
         elements.participantsGrid.innerHTML = '';
-
         state.isJoined = false;
-        console.log('Left room');
     }
 
     function toggleMute() {
         if (!state.microphoneStream) return;
-
         state.isMuted = !state.isMuted;
-
-        sendJSONMessage('mute', {
-            isMuted: state.isMuted
-        });
-
+        sendJSONMessage('mute', { isMuted: state.isMuted });
         elements.micBtn.textContent = state.isMuted ? '🔇' : '🎤';
-        console.log(state.isMuted ? 'Muted' : 'Unmuted');
     }
 
     function openSettings() {
-        if (elements.settingsModal) {
-            elements.settingsModal.style.display = 'flex';
-        }
+        if (elements.settingsModal) elements.settingsModal.style.display = 'flex';
     }
 
     function closeSettings() {
-        if (elements.settingsModal) {
-            elements.settingsModal.style.display = 'none';
-        }
+        if (elements.settingsModal) elements.settingsModal.style.display = 'none';
     }
 
     function addParticipantToUI(user, isSelf = false) {
-        if (state.participants.has(user.id)) {
-            return;
-        }
+        if (state.participants.has(user.id)) return;
 
         const card = document.createElement('div');
         card.className = 'participant-card glass';
@@ -374,6 +403,21 @@ if (window.voiceChatApp) {
 
         card.appendChild(avatar);
         card.appendChild(name);
+
+        // Добавляем регулятор громкости для других пользователей
+        if (!isSelf) {
+            const volumeControl = document.createElement('input');
+            volumeControl.type = 'range';
+            volumeControl.min = '0';
+            volumeControl.max = '200';
+            volumeControl.value = '100';
+            volumeControl.className = 'volume-control';
+            volumeControl.addEventListener('input', (e) => {
+                const volume = parseInt(e.target.value) / 100;
+                state.volumeLevels.set(user.id, volume);
+            });
+            card.appendChild(volumeControl);
+        }
 
         elements.participantsGrid.appendChild(card);
         state.participants.set(user.id, { user, card, isSelf });
