@@ -1,111 +1,109 @@
-class AudioProcessor {
+class NeuralAudioProcessor {
     constructor() {
-        this.audioContext = null;
-        this.opusEncoder = null;
-        this.opusDecoder = null;
+        this.rnnoise = null;
         this.isInitialized = false;
+        this.vadThreshold = 0.01;
+        this.speakingCallback = null;
+        this.denoiser = null;
     }
-    
+
     async init() {
         if (this.isInitialized) return;
-        
-        // Инициализируем AudioContext
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-            sampleRate: 48000,
-            latencyHint: 'interactive'
-        });
-        
-        // Загружаем Opus кодек (WebAssembly)
-        await this.loadOpusCodec();
-        
-        this.isInitialized = true;
-    }
-    
-    async loadOpusCodec() {
-        // Используем opus-recorder или подобную библиотеку
-        // Для простоты используем MediaRecorder с Opus
-        // Или можно использовать opusscript (чистый JS)
-        
-        // Временно используем PCM, но с лучшей обработкой
-        console.log('Opus codec loading...');
-    }
-    
-    createNoiseFilter() {
-        // Создаём многополосный эквалайзер
-        const filters = [];
-        
-        // Low shelf - уменьшаем низкие частоты
-        const lowShelf = this.audioContext.createBiquadFilter();
-        lowShelf.type = 'lowshelf';
-        lowShelf.frequency.value = 200;
-        lowShelf.gain.value = -6; // -6 dB
-        
-        // High shelf - усиливаем высокие для чёткости
-        const highShelf = this.audioContext.createBiquadFilter();
-        highShelf.type = 'highshelf';
-        highShelf.frequency.value = 4000;
-        highShelf.gain.value = 3; // +3 dB
-        
-        // Peaking - усиливаем речевые частоты
-        const peaking = this.audioContext.createBiquadFilter();
-        peaking.type = 'peaking';
-        peaking.frequency.value = 2500;
-        peaking.Q.value = 1.0;
-        peaking.gain.value = 6; // +6 dB
-        
-        filters.push(lowShelf, highShelf, peaking);
-        return filters;
-    }
-    
-    createCompressor() {
-        const compressor = this.audioContext.createDynamicsCompressor();
-        compressor.threshold.value = -30;
-        compressor.knee.value = 20;
-        compressor.ratio.value = 8;
-        compressor.attack.value = 0.002;
-        compressor.release.value = 0.1;
-        return compressor;
-    }
-    
-    createNoiseGate() {
-        // Создаём noise gate через ScriptProcessor
-        const noiseGate = this.audioContext.createScriptProcessor(512, 1, 1);
-        const threshold = 0.01; // -40 dB
-        
-        noiseGate.onaudioprocess = (event) => {
-            const input = event.inputBuffer.getChannelData(0);
-            const output = event.outputBuffer.getChannelData(0);
-            
-            // Вычисляем RMS
-            let sum = 0;
-            for (let i = 0; i < input.length; i++) {
-                sum += input[i] * input[i];
-            }
-            const rms = Math.sqrt(sum / input.length);
-            
-            // Применяем gate
-            if (rms < threshold) {
-                // Тишина
-                output.fill(0);
+
+        try {
+            // Загружаем RNNoise WASM с CDN
+            const module = await import('https://cdn.jsdelivr.net/npm/rnnoise-wasm@latest/dist/index.js');
+
+            if (module.default) {
+                this.rnnoise = module.default;
+            } else if (module.create) {
+                this.rnnoise = await module.create();
             } else {
-                // Пропускаем звук
-                output.set(input);
+                // Пробуем разные варианты экспорта
+                this.rnnoise = module;
             }
-        };
-        
-        return noiseGate;
+
+            // Создаём денойзер
+            if (this.rnnoise && typeof this.rnnoise.createDenoiser === 'function') {
+                this.denoiser = await this.rnnoise.createDenoiser();
+            } else if (this.rnnoise && this.rnnoise.Denoiser) {
+                this.denoiser = new this.rnnoise.Denoiser();
+            }
+
+            this.isInitialized = true;
+            console.log('RNNoise initialized successfully');
+        } catch (error) {
+            console.warn('RNNoise initialization failed:', error);
+            this.isInitialized = false;
+            this.denoiser = null;
+        }
     }
-    
-    createEchoCanceller() {
-        // Простое эхоподавление через компрессор
-        const echoCanceller = this.audioContext.createDynamicsCompressor();
-        echoCanceller.threshold.value = -20;
-        echoCanceller.knee.value = 10;
-        echoCanceller.ratio.value = 4;
-        echoCanceller.attack.value = 0.001;
-        echoCanceller.release.value = 0.05;
-        return echoCanceller;
+
+    processAudio(float32Array) {
+        if (!this.denoiser || !this.isInitialized) {
+            return float32Array;
+        }
+
+        try {
+            // Конвертируем Float32 в Int16
+            const pcm16 = new Int16Array(float32Array.length);
+            for (let i = 0; i < float32Array.length; i++) {
+                const s = Math.max(-1, Math.min(1, float32Array[i]));
+                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+
+            // Обрабатываем через RNNoise
+            const frameSize = 480; // 10ms при 48kHz
+            const output = new Float32Array(float32Array.length);
+
+            for (let i = 0; i < pcm16.length; i += frameSize) {
+                const chunk = pcm16.slice(i, i + frameSize);
+                if (chunk.length === frameSize) {
+                    let denoised;
+
+                    if (typeof this.denoiser.process === 'function') {
+                        denoised = this.denoiser.process(chunk);
+                    } else if (typeof this.denoiser === 'function') {
+                        denoised = this.denoiser(chunk);
+                    } else {
+                        denoised = chunk;
+                    }
+
+                    if (denoised) {
+                        for (let j = 0; j < chunk.length; j++) {
+                            output[i + j] = denoised[j] / 32768.0;
+                        }
+                    } else {
+                        for (let j = 0; j < chunk.length; j++) {
+                            output[i + j] = chunk[j] / 32768.0;
+                        }
+                    }
+                } else {
+                    for (let j = 0; j < chunk.length; j++) {
+                        output[i + j] = chunk[j] / 32768.0;
+                    }
+                }
+            }
+
+            return output;
+        } catch (e) {
+            console.warn('RNNoise processing failed:', e);
+            return float32Array;
+        }
+    }
+
+    detectVoice(float32Array) {
+        let sum = 0;
+        for (let i = 0; i < float32Array.length; i++) {
+            sum += float32Array[i] * float32Array[i];
+        }
+        const rms = Math.sqrt(sum / float32Array.length);
+        return rms > this.vadThreshold;
+    }
+
+    setSpeakingCallback(callback) {
+        this.speakingCallback = callback;
     }
 }
 
-window.audioProcessor = new AudioProcessor();
+window.neuralAudioProcessor = new NeuralAudioProcessor();

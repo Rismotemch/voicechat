@@ -201,6 +201,8 @@ if (window.voiceChatApp) {
         return noiseGate;
     }
 
+    window.neuralAudioProcessor.init().catch(() => { });
+
     async function startMicrophone() {
         await initAudioContext();
 
@@ -244,7 +246,21 @@ if (window.voiceChatApp) {
         state.audioProcessor.onaudioprocess = (event) => {
             if (!state.isJoined || state.isMuted) return;
 
-            const audioData = event.inputBuffer.getChannelData(0);
+            let audioData = event.inputBuffer.getChannelData(0);
+
+            // Применяем RNNoise (если инициализирован)
+            audioData = window.neuralAudioProcessor.processAudio(audioData);
+
+            // VAD
+            const hasVoice = window.neuralAudioProcessor.detectVoice(audioData);
+
+            if (!hasVoice) {
+                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                    state.ws.send(new Uint8Array([0]));
+                }
+                return;
+            }
+
             const pcmData = floatToPCM16Optimized(audioData);
 
             if (state.ws && state.ws.readyState === WebSocket.OPEN) {
