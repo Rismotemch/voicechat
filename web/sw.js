@@ -1,4 +1,4 @@
-const CACHE_NAME = 'voicechat-v2.0.0';
+const CACHE_NAME = 'voicechat-v3.0.0'; // Увеличьте версию
 const urlsToCache = [
     '/',
     '/css/style.css',
@@ -28,6 +28,7 @@ self.addEventListener('activate', event => {
             return Promise.all(
                 cacheNames.map(cacheName => {
                     if (cacheName !== CACHE_NAME) {
+                        console.log('Deleting old cache:', cacheName);
                         return caches.delete(cacheName);
                     }
                 })
@@ -45,12 +46,12 @@ self.addEventListener('fetch', event => {
                 if (response) {
                     return response;
                 }
-
+                
                 // Для навигации возвращаем index.html
                 if (event.request.mode === 'navigate') {
                     return caches.match('/');
                 }
-
+                
                 return fetch(event.request);
             })
     );
@@ -61,17 +62,4 @@ self.addEventListener('message', event => {
     if (event.data && event.data.type === 'SKIP_WAITING') {
         self.skipWaiting();
     }
-});
-
-// Push уведомления (для будущего)
-self.addEventListener('push', event => {
-    const options = {
-        body: event.data ? event.data.text() : 'Новое уведомление',
-        icon: '/icons/icon-192.png',
-        badge: '/icons/icon-192.png'
-    };
-
-    event.waitUntil(
-        self.registration.showNotification('Voice Chat', options)
-    );
 });
