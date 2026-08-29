@@ -4,32 +4,54 @@ class NeuralAudioProcessor {
         this.isInitialized = false;
         this.vadThreshold = 0.01;
         this.denoiser = null;
+        this.initPromise = null;
     }
 
     async init() {
         if (this.isInitialized) return;
+        if (this.initPromise) return this.initPromise;
 
+        this.initPromise = this._loadRNNoise();
+        return this.initPromise;
+    }
+
+    async _loadRNNoise() {
         try {
-            // Пробуем загрузить локально
-            const module = await import('/js/rnnoise/index.js');
+            // Загружаем RNNoise WASM с CDN
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@latest/dist/rnnoise.js';
+            document.head.appendChild(script);
 
-            if (module.default) {
-                this.rnnoise = module.default;
+            await new Promise((resolve, reject) => {
+                script.onload = resolve;
+                script.onerror = () => reject(new Error('Failed to load RNNoise script'));
+                setTimeout(() => reject(new Error('RNNoise script timeout')), 10000);
+            });
+
+            if (window.RNNoise) {
+                this.rnnoise = window.RNNoise;
+            } else if (window.rnnoise) {
+                this.rnnoise = window.rnnoise;
             } else {
-                this.rnnoise = module;
+                throw new Error('RNNoise not found in window');
             }
 
-            if (this.rnnoise && typeof this.rnnoise.createDenoiser === 'function') {
+            // Создаём денойзер
+            if (typeof this.rnnoise.createDenoiser === 'function') {
                 this.denoiser = await this.rnnoise.createDenoiser();
+            } else if (typeof this.rnnoise === 'function') {
+                this.denoiser = new this.rnnoise();
             }
 
             this.isInitialized = true;
             console.log('RNNoise initialized successfully');
         } catch (error) {
-            console.warn('RNNoise initialization failed, using browser noise suppression:', error);
+            console.warn('RNNoise initialization failed, using browser noise suppression:', error.message);
             this.isInitialized = false;
             this.denoiser = null;
         }
+
+        return this.isInitialized;
     }
 
     processAudio(float32Array) {
@@ -46,20 +68,18 @@ class NeuralAudioProcessor {
             }
 
             // Обрабатываем через RNNoise
-            const frameSize = 480; // 10ms при 48kHz
+            const frameSize = 480;
             const output = new Float32Array(float32Array.length);
 
             for (let i = 0; i < pcm16.length; i += frameSize) {
                 const chunk = pcm16.slice(i, i + frameSize);
                 if (chunk.length === frameSize) {
-                    let denoised;
+                    let denoised = null;
 
                     if (typeof this.denoiser.process === 'function') {
                         denoised = this.denoiser.process(chunk);
                     } else if (typeof this.denoiser === 'function') {
                         denoised = this.denoiser(chunk);
-                    } else {
-                        denoised = chunk;
                     }
 
                     if (denoised) {

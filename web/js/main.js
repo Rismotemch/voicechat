@@ -206,10 +206,16 @@ if (window.voiceChatApp) {
     async function startMicrophone() {
         await initAudioContext();
 
+        // Инициализируем RNNoise (не блокируем, если не загрузится)
+        window.neuralAudioProcessor.init().catch(err => {
+            console.warn('RNNoise init failed:', err);
+        });
+
+        // Захватываем микрофон с встроенным шумоподавлением
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: state.echoCancellationEnabled,
-                noiseSuppression: state.noiseSuppressionEnabled,
+                noiseSuppression: true, // Встроенное шумоподавление (работает сразу)
                 autoGainControl: true,
                 channelCount: 1,
                 sampleRate: state.sampleRate
@@ -248,8 +254,10 @@ if (window.voiceChatApp) {
 
             let audioData = event.inputBuffer.getChannelData(0);
 
-            // Применяем RNNoise (если инициализирован)
-            audioData = window.neuralAudioProcessor.processAudio(audioData);
+            // Применяем RNNoise если доступен
+            if (window.neuralAudioProcessor && window.neuralAudioProcessor.isInitialized) {
+                audioData = window.neuralAudioProcessor.processAudio(audioData);
+            }
 
             // VAD
             const hasVoice = window.neuralAudioProcessor.detectVoice(audioData);
