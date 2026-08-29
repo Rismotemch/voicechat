@@ -49,3 +49,5 @@ data/uploads/*
 
 # Temp
 tmp/
+
+node_modules/
