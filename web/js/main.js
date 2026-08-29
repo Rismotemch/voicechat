@@ -225,17 +225,27 @@ if (window.voiceChatApp) {
         currentNode.connect(analyser);
         state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
         state.audioProcessor.onaudioprocess = (event) => {
-            if (!state.isJoined || state.isMuted) return;
+            if (!state.isJoined || state.isMuted) {
+                // Если не в комнате, отправляем тишину (1 байт)
+                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                    state.ws.send(new Uint8Array([0]));
+                }
+                return;
+            }
+
             const audioData = event.inputBuffer.getChannelData(0);
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteTimeDomainData(dataArray);
+
             let sum = 0;
             for (let i = 0; i < dataArray.length; i++) {
                 const value = (dataArray[i] - 128) / 128;
                 sum += value * value;
             }
             const rms = Math.sqrt(sum / dataArray.length);
+
             if (rms < state.speakingThreshold) {
+                // Отправляем маркер тишины
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                     state.ws.send(new Uint8Array([0]));
                 }
@@ -245,9 +255,11 @@ if (window.voiceChatApp) {
                 header[0] = 1;
                 header[1] = (pcmData.byteLength >> 8) & 0xFF;
                 header[2] = pcmData.byteLength & 0xFF;
+
                 const combined = new Uint8Array(header.length + pcmData.byteLength);
                 combined.set(header);
                 combined.set(new Uint8Array(pcmData), header.length);
+
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                     state.ws.send(combined.buffer);
                 }
@@ -269,14 +281,21 @@ if (window.voiceChatApp) {
     function processPCMData(userId, pcmData) {
         if (!state.audioContext) return;
 
-        // Убедимся, что длина чётная (Int16Array требует 2 байта на элемент)
-        let byteArray = new Uint8Array(pcmData);
-        if (byteArray.length % 2 !== 0) {
-            // Обрезаем до чётного количества байт
-            byteArray = byteArray.slice(0, byteArray.length - 1);
+        const dataArray = new Uint8Array(pcmData);
+        // Проверяем, что данных достаточно (минимум 2 байта для одного сэмпла)
+        if (dataArray.length < 2) {
+            return;
         }
 
-        const int16Array = new Int16Array(byteArray.buffer);
+        // Обрезаем до чётного количества байт
+        let byteLength = dataArray.length;
+        if (byteLength % 2 !== 0) {
+            byteLength--;
+        }
+        if (byteLength < 2) return;
+
+        // Используем только чётную часть
+        const int16Array = new Int16Array(dataArray.buffer, dataArray.byteOffset, byteLength / 2);
         const float32Array = new Float32Array(int16Array.length);
         for (let i = 0; i < int16Array.length; i++) {
             float32Array[i] = int16Array[i] / 32768.0;
@@ -334,11 +353,15 @@ if (window.voiceChatApp) {
     function stopMicrophone() {
         if (state.audioProcessor) {
             state.audioProcessor.disconnect();
+            state.audioProcessor.onaudioprocess = null;
             state.audioProcessor = null;
         }
         state.processingChain = [];
         if (state.microphoneStream) {
-            state.microphoneStream.getTracks().forEach(track => track.stop());
+            state.microphoneStream.getTracks().forEach(track => {
+                track.stop();
+                track.enabled = false;
+            });
             state.microphoneStream = null;
         }
     }
@@ -544,7 +567,15 @@ if (window.voiceChatApp) {
     }
 
     function leaveRoom() {
+        // Полностью останавливаем микрофон
         stopMicrophone();
+
+        // Останавливаем все аудио
+        if (state.audioContext) {
+            state.audioContext.close().catch(() => { });
+            state.audioContext = null;
+        }
+
         state.isJoined = false;
         state.participants.clear();
         document.querySelectorAll('.participant-card').forEach(c => c.remove());
