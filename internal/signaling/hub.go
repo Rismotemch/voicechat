@@ -20,11 +20,11 @@ import (
 )
 
 const (
-	writeWait      = 10 * time.Second
+	writeWait      = 5 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512 * 1024 // 512 KB
-	sendChannelCap = 4
+	sendChannelCap = 16         // 16 фреймов по 20мс = 320мс максимальной очереди
 	maxChatTextLen = 2000
 )
 
@@ -56,6 +56,26 @@ func (c *Client) closeSendChannel() {
 	c.closeOnce.Do(func() {
 		close(c.Send)
 	})
+}
+
+// SendAudioDropOldest отправляет аудио-пакет. Если канал переполнен из-за лага TCP,
+// удаляется самый старый пакет из очереди и записывается свежий кадр реального времени.
+func (c *Client) SendAudioDropOldest(msg []byte) {
+	select {
+	case c.Send <- msg:
+		return
+	default:
+		// Вытесняем старый пакет
+		select {
+		case <-c.Send:
+		default:
+		}
+		// Записываем актуальный
+		select {
+		case c.Send <- msg:
+		default:
+		}
+	}
 }
 
 // =============================================================================
@@ -95,9 +115,13 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Отключаем буферизацию сокета на уровне ОС (TCP_NODELAY)
-	if tcpConn, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
-		_ = tcpConn.SetNoDelay(true)
+	// Отключение буферизации Nagle на уровне сетевого стека ОС
+	if netConn := conn.UnderlyingConn(); netConn != nil {
+		if tcpConn, ok := netConn.(*net.TCPConn); ok {
+			_ = tcpConn.SetNoDelay(true)
+			_ = tcpConn.SetKeepAlive(true)
+			_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		}
 	}
 
 	client := &Client{
@@ -115,7 +139,6 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.readPump()
 }
 
-// HandleUpload принимает multipart-файлы для обмена в текстовом микро-чате
 func (h *Hub) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -204,7 +227,7 @@ func (c *Client) readPump() {
 		messageType, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.Hub.log.Warn().Err(err).Str("clientId", c.ID).Msg("WebSocket read loop closed unexpectedly")
+				c.Hub.log.Warn().Err(err).Str("clientId", c.ID).Msg("WebSocket read loop closed")
 			}
 			break
 		}
@@ -451,8 +474,8 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		return
 	}
 
-	// Передаем реальный канал сокета c.Send
-	audioClient := NewAudioClient(c.ID, user.ID, c.Send)
+	// Передаем ссылку на метод отправки дропа устаревших пакетов
+	audioClient := NewAudioClient(c.ID, user.ID, c.SendAudioDropOldest)
 	audioHub.AddClient(audioClient)
 
 	c.mu.Lock()

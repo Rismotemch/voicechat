@@ -17,10 +17,10 @@ const (
 	// Базовые параметры DSP
 	HighPassCutoffFreq = 80.0  // Частота среза High-Pass фильтра в Гц
 	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
-	VADEnergyThreshold = 0.008 // Минимальный порог RMS для детекции речи
-	VADHangoverFrames  = 25    // Удержание VAD (10 фреймов = 200 мс)
+	VADEnergyThreshold = 0.002 // Порог RMS детекции голоса
+	VADHangoverFrames  = 20    // Удержание VAD (20 фреймов = 400 мс)
 	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
-	MaxGainMultiplier  = 3.0   // Максимальное усиление слабого сигнала
+	MaxGainMultiplier  = 3.5   // Максимальное усиление слабого сигнала
 )
 
 // =============================================================================
@@ -37,7 +37,7 @@ var (
 )
 
 // =============================================================================
-// DSP: Универсальный Biquad Filter (HighPass, LowPass, BandPass)
+// DSP: Biquad Filter (HighPass, LowPass, BandPass)
 // =============================================================================
 
 type BiquadFilter struct {
@@ -174,14 +174,14 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	// 1. High-Pass фильтрация
 	p.hpFilter.Process(samples, samples)
 
-	// 2. Расчет RMS
+	// 2. Расчет среднеквадратичной энергии (RMS)
 	var sum float32
 	for i := 0; i < n; i++ {
 		sum += samples[i] * samples[i]
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. VAD с таймером удержания (Hangover)
+	// 3. VAD с удержанием хвостов
 	if rms >= VADEnergyThreshold {
 		p.hangoverCount = VADHangoverFrames
 		p.isSpeaking = true
@@ -196,10 +196,10 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 4. Применение спецэффектов
+	// 4. Применение голосовых эффектов
 	p.applyVoiceEffects(samples)
 
-	// 5. AGC (Автоматическая регулировка усиления)
+	// 5. AGC
 	if rms > 0.001 {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
@@ -302,18 +302,17 @@ func (p *AudioProcessor) Reset() {
 type AudioClient struct {
 	ID        string
 	UserID    string
-	Send      chan []byte // Прямая ссылка на исходящий канал WebSocket-сессии
+	SendFn    func([]byte)
 	IsMuted   bool
 	Processor *AudioProcessor
 	mu        sync.RWMutex
 }
 
-// NewAudioClient инициализирует клиентский аудио-узел с рабочим WebSocket каналом
-func NewAudioClient(id, userID string, sendChan chan []byte) *AudioClient {
+func NewAudioClient(id, userID string, sendFn func([]byte)) *AudioClient {
 	return &AudioClient{
 		ID:        id,
 		UserID:    userID,
-		Send:      sendChan,
+		SendFn:    sendFn,
 		IsMuted:   false,
 		Processor: NewAudioProcessor(),
 	}
@@ -441,11 +440,8 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 	defer h.mu.RUnlock()
 
 	for id, client := range h.clients {
-		if id != senderID {
-			select {
-			case client.Send <- outPacket:
-			default:
-			}
+		if id != senderID && client.SendFn != nil {
+			client.SendFn(outPacket)
 		}
 	}
 }

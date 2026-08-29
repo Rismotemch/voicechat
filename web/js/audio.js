@@ -1,23 +1,21 @@
 /**
  * VoiceChat Audio Engine - web/js/audio.js
- * Optimized Web Audio API pipeline:
- * - Real-time downsampling (48kHz/44.1kHz -> 16kHz)
- * - Seamless sample-accurate scheduling (no 50Hz modulation buzz)
- * - Safari/iOS auto-unlocking & zero-latency playback
+ * High-performance AudioWorklet capture pipeline with adaptive jitter buffer,
+ * sample-accurate Web Audio scheduling, and Safari/iOS auto-unlock.
  */
 
 class AudioManager {
     constructor(options = {}) {
-        this.targetSampleRate = 16000; // Целевая частота DSP-сервера
-        this.frameDurationMs = 20;     // 20 мс
+        this.targetSampleRate = 16000;
+        this.frameDurationMs = 20;
         this.samplesPerFrame = (this.targetSampleRate * this.frameDurationMs) / 1000; // 320 сэмплов
-        this.jitterBufferMs = options.jitterBufferMs || 40; // 40 мс стартовый буфер
-        this.maxDriftSec = options.maxDriftSec || 0.12;
+        this.jitterBufferMs = options.jitterBufferMs || 50; // 50 мс стартовый буфер
+        this.maxDriftSec = options.maxDriftSec || 0.14;     // Максимальный допуск дрейфа 140 мс
 
         this.audioCtx = null;
         this.micStream = null;
         this.micSourceNode = null;
-        this.micProcessorNode = null;
+        this.workletNode = null;
 
         this.masterGainNode = null;
         this.analyserNode = null;
@@ -27,6 +25,7 @@ class AudioManager {
 
         this.isMuted = false;
         this.isInitialized = false;
+        this.isWorkletLoaded = false;
         this.textDecoder = new TextDecoder('utf-8');
 
         // Callbacks
@@ -73,9 +72,22 @@ class AudioManager {
         } catch (e) { }
     }
 
+    async ensureWorkletLoaded() {
+        if (this.isWorkletLoaded) return;
+        try {
+            await this.audioCtx.audioWorklet.addModule('js/audio-processor.js');
+            this.isWorkletLoaded = true;
+        } catch (err) {
+            // Повторная попытка с абсолютным путем
+            await this.audioCtx.audioWorklet.addModule('/js/audio-processor.js');
+            this.isWorkletLoaded = true;
+        }
+    }
+
     async startMicrophone(echoCancellation = true) {
         await this.init();
         await this.unlockAudioContext();
+        await this.ensureWorkletLoaded();
 
         if (this.micStream) {
             this.stopMicrophone();
@@ -94,59 +106,20 @@ class AudioManager {
         this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
         this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-        // Буфер захвата 2048 сэмплов для стабильной работы в WebKit
-        this.micProcessorNode = this.audioCtx.createScriptProcessor(2048, 1, 1);
+        // Инициализация легковесного потокового AudioWorkletNode
+        this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture-processor');
 
-        const inputSampleRate = this.audioCtx.sampleRate;
-        const resampleRatio = inputSampleRate / this.targetSampleRate;
-        let resampleBuffer = [];
-
-        this.micProcessorNode.onaudioprocess = (e) => {
+        this.workletNode.port.onmessage = (event) => {
             if (this.isMuted) return;
-
-            const inputData = e.inputBuffer.getChannelData(0);
-
-            // Линейный ресэмплинг из нативной частоты браузера (48к/44.1к) в 16кГц
-            let sourceIndex = 0;
-            while (sourceIndex < inputData.length) {
-                const i0 = Math.floor(sourceIndex);
-                const i1 = Math.min(i0 + 1, inputData.length - 1);
-                const frac = sourceIndex - i0;
-
-                const sample = inputData[i0] * (1 - frac) + inputData[i1] * frac;
-                resampleBuffer.push(sample);
-
-                sourceIndex += resampleRatio;
-            }
-
-            // Нарезка строго по 320 сэмплов (20 мс)
-            while (resampleBuffer.length >= this.samplesPerFrame) {
-                const frame = resampleBuffer.splice(0, this.samplesPerFrame);
-                const pcm16Buffer = new ArrayBuffer(this.samplesPerFrame * 2);
-                const view = new DataView(pcm16Buffer);
-
-                for (let j = 0; j < this.samplesPerFrame; j++) {
-                    let s = frame[j];
-                    if (s > 1.0) s = 1.0;
-                    if (s < -1.0) s = -1.0;
-                    const int16 = s < 0 ? s * 32768 : s * 32767;
-                    view.setInt16(j * 2, int16, true); // Little-Endian
-                }
-
-                if (this.onAudioFrame) {
-                    this.onAudioFrame(pcm16Buffer);
-                }
+            const pcm16Buffer = event.data;
+            if (this.onAudioFrame && pcm16Buffer) {
+                this.onAudioFrame(pcm16Buffer);
             }
         };
 
+        // Связываем ноды
         this.micSourceNode.connect(this.analyserNode);
-        this.micSourceNode.connect(this.micProcessorNode);
-
-        // Необходимая заглушка для работы ScriptProcessor в Safari
-        const dummyGain = this.audioCtx.createGain();
-        dummyGain.gain.value = 0;
-        this.micProcessorNode.connect(dummyGain);
-        dummyGain.connect(this.audioCtx.destination);
+        this.micSourceNode.connect(this.workletNode);
     }
 
     stopMicrophone() {
@@ -154,9 +127,9 @@ class AudioManager {
             this.micStream.getTracks().forEach(t => t.stop());
             this.micStream = null;
         }
-        if (this.micProcessorNode) {
-            this.micProcessorNode.disconnect();
-            this.micProcessorNode = null;
+        if (this.workletNode) {
+            this.workletNode.disconnect();
+            this.workletNode = null;
         }
         if (this.micSourceNode) {
             this.micSourceNode.disconnect();
@@ -166,6 +139,9 @@ class AudioManager {
 
     toggleMute() {
         this.isMuted = !this.isMuted;
+        if (this.workletNode) {
+            this.workletNode.port.postMessage({ isMuted: this.isMuted });
+        }
         if (this.isMuted && this.onSpeakingStateChange) {
             this.onSpeakingStateChange('self', false);
         }
@@ -219,7 +195,7 @@ class AudioManager {
     }
 
     /**
-     * Бесшовное воспроизведение входящих фреймов (без 50 Гц вибрации)
+     * Адаптивное планирование с защитой от джиттера WAN сетей
      */
     async playAudioPacket(arrayBuffer) {
         if (!this.audioCtx) return;
@@ -255,7 +231,6 @@ class AudioManager {
             float32Data[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        // Web Audio API автоматически апсэмплит 16кГц в 48кГц звуковой карты
         const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.targetSampleRate);
         audioBuffer.getChannelData(0).set(float32Data);
 
@@ -267,8 +242,12 @@ class AudioManager {
         const now = this.audioCtx.currentTime;
         const frameDuration = sampleCount / this.targetSampleRate;
 
-        // Бесшовная склейка без сброса таймлайна на каждом фрейме
-        if (participant.nextPlayTime < now || (participant.nextPlayTime - now) > this.maxDriftSec) {
+        // Управление джиттер-буфером
+        if (participant.nextPlayTime < now) {
+            // Если сеть затормозила и очередь опустела, планируем с легким запасом вперед
+            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
+        } else if ((participant.nextPlayTime - now) > this.maxDriftSec) {
+            // Если из-за всплеска пакетов очередь ушла вперед больше чем на maxDriftSec, мягко сгоняем лаг
             participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
         }
 

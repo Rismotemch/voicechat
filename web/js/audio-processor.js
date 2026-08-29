@@ -1,78 +1,79 @@
 /**
- * VoiceChat High-Performance Audio Worklet Processors
- * File: web/js/audio-processor.js
- * 
- * Runs in a dedicated audio rendering thread (AudioWorkletGlobalScope).
- * Zero garbage collection overhead, real-time PCM16 quantization and streaming.
+ * VoiceChat AudioWorklet Processor - web/js/audio-processor.js
+ * Runs in dedicated AudioWorklet thread:
+ * - Real-time downsampling to 16kHz
+ * - Zero-copy 20ms frame slicing (320 samples)
+ * - Immune to UI thread lag & garbage collector spikes
  */
 
-// =============================================================================
-// 1. Capture Processor (Mic Float32 -> Int16 PCM 20ms Frames)
-// =============================================================================
-class VoiceCaptureProcessor extends AudioWorkletProcessor {
+class PCMCaptureProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
-        this.frameSize = 320; // 20ms при 16000 Hz (16000 * 0.02)
-        this.accumulator = new Float32Array(this.frameSize);
-        this.accumulatedSamples = 0;
+        this.targetSampleRate = 16000;
+        this.samplesPerFrame = 320; // 20 мс при 16 кГц
+
+        this.resampleBuffer = [];
+        this.sourceIndex = 0;
         this.isMuted = false;
 
         this.port.onmessage = (event) => {
             if (event.data && typeof event.data.isMuted === 'boolean') {
                 this.isMuted = event.data.isMuted;
+                if (this.isMuted) {
+                    this.resampleBuffer = [];
+                    this.sourceIndex = 0;
+                }
             }
         };
     }
 
     process(inputs, outputs, parameters) {
-        const input = inputs[0];
-        if (!input || input.length === 0) {
-            return true;
-        }
-
-        const channelData = input[0];
-        const inputLen = channelData.length;
-
         if (this.isMuted) {
-            this.accumulatedSamples = 0;
             return true;
         }
 
-        let readOffset = 0;
+        const input = inputs[0];
+        if (!input || !input[0] || input[0].length === 0) {
+            return true;
+        }
 
-        while (readOffset < inputLen) {
-            const needed = this.frameSize - this.accumulatedSamples;
-            const available = inputLen - readOffset;
-            const toCopy = Math.min(needed, available);
+        const inputChannel = input[0]; // Моно-канал (128 сэмплов)
+        const inputLen = inputChannel.length;
+        const resampleRatio = sampleRate / this.targetSampleRate;
 
-            this.accumulator.set(
-                channelData.subarray(readOffset, readOffset + toCopy),
-                this.accumulatedSamples
-            );
+        // Потоковый линейный ресэмплинг
+        while (this.sourceIndex < inputLen) {
+            const i0 = Math.floor(this.sourceIndex);
+            const i1 = Math.min(i0 + 1, inputLen - 1);
+            const frac = this.sourceIndex - i0;
 
-            this.accumulatedSamples += toCopy;
-            readOffset += toCopy;
+            const sample = inputChannel[i0] * (1 - frac) + inputChannel[i1] * frac;
+            this.resampleBuffer.push(sample);
 
-            if (this.accumulatedSamples >= this.frameSize) {
-                this.flushFrame();
-                this.accumulatedSamples = 0;
+            this.sourceIndex += resampleRatio;
+        }
+        this.sourceIndex -= inputLen;
+
+        // Нарезка строго по 320 сэмплов (20 мс)
+        while (this.resampleBuffer.length >= this.samplesPerFrame) {
+            const frame = this.resampleBuffer.splice(0, this.samplesPerFrame);
+            const pcm16Buffer = new ArrayBuffer(this.samplesPerFrame * 2);
+            const view = new DataView(pcm16Buffer);
+
+            for (let j = 0; j < this.samplesPerFrame; j++) {
+                let s = frame[j];
+                if (s > 1.0) s = 1.0;
+                if (s < -1.0) s = -1.0;
+                const int16 = s < 0 ? s * 32768 : s * 32767;
+                view.setInt16(j * 2, int16, true); // Little-Endian
             }
+
+            // Zero-copy transfer буфера в основной поток
+            this.port.postMessage(pcm16Buffer, [pcm16Buffer]);
         }
 
         return true;
     }
-
-    flushFrame() {
-        const pcm16 = new Int16Array(this.frameSize);
-        for (let i = 0; i < this.frameSize; i++) {
-            // Hard clamp [-1.0, 1.0] для предотвращения переполнения разрядности Int16
-            const sample = Math.max(-1.0, Math.min(1.0, this.accumulator[i]));
-            pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
-        }
-
-        // Передаем ArrayBuffer с передачей владения (Transferable Objects) без копирования памяти
-        this.port.postMessage(pcm16.buffer, [pcm16.buffer]);
-    }
 }
 
-registerProcessor('voice-capture-processor', VoiceCaptureProcessor);
+registerProcessor('pcm-capture-processor', PCMCaptureProcessor);
