@@ -18,8 +18,8 @@ class AudioManager {
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000;
         this.frameDurationMs = options.frameDurationMs || 20;
-        this.jitterBufferMs = options.jitterBufferMs || 50;
-        this.maxDriftSec = options.maxDriftSec || 0.15;
+        this.jitterBufferMs = options.jitterBufferMs || 30;
+        this.maxDriftSec = options.maxDriftSec || 0.08;
 
         /** @type {AudioContext|null} */
         this.audioContext = null;

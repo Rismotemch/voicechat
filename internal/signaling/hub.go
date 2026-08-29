@@ -23,7 +23,7 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512 * 1024 // 512 KB
-	sendChannelCap = 512
+	sendChannelCap = 4
 	maxChatTextLen = 2000
 )
 
