@@ -3,7 +3,6 @@ class NeuralAudioProcessor {
         this.rnnoise = null;
         this.isInitialized = false;
         this.vadThreshold = 0.01;
-        this.speakingCallback = null;
         this.denoiser = null;
     }
 
@@ -11,29 +10,23 @@ class NeuralAudioProcessor {
         if (this.isInitialized) return;
 
         try {
-            // Загружаем RNNoise WASM с CDN
-            const module = await import('https://cdn.jsdelivr.net/npm/rnnoise-wasm@latest/dist/index.js');
+            // Пробуем загрузить локально
+            const module = await import('/js/rnnoise/index.js');
 
             if (module.default) {
                 this.rnnoise = module.default;
-            } else if (module.create) {
-                this.rnnoise = await module.create();
             } else {
-                // Пробуем разные варианты экспорта
                 this.rnnoise = module;
             }
 
-            // Создаём денойзер
             if (this.rnnoise && typeof this.rnnoise.createDenoiser === 'function') {
                 this.denoiser = await this.rnnoise.createDenoiser();
-            } else if (this.rnnoise && this.rnnoise.Denoiser) {
-                this.denoiser = new this.rnnoise.Denoiser();
             }
 
             this.isInitialized = true;
             console.log('RNNoise initialized successfully');
         } catch (error) {
-            console.warn('RNNoise initialization failed:', error);
+            console.warn('RNNoise initialization failed, using browser noise suppression:', error);
             this.isInitialized = false;
             this.denoiser = null;
         }

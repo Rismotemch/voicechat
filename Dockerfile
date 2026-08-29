@@ -21,6 +21,13 @@ FROM alpine:3.18
 
 WORKDIR /app
 
+COPY package.json ./
+RUN npm install
+
+COPY web ./web
+COPY build.js ./
+RUN node build.js
+
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates tzdata
 
