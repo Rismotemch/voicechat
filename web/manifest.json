@@ -1,12 +1,16 @@
 {
     "name": "Voice Chat",
     "short_name": "VoiceChat",
-    "description": "Private voice chat for friends",
+    "description": "Голосовой чат для общения с друзьями",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#0a0a0f",
-    "theme_color": "#0a0a0f",
+    "background_color": "#121212",
+    "theme_color": "#121212",
     "orientation": "portrait-primary",
+    "categories": [
+        "social",
+        "communication"
+    ],
     "icons": [
         {
             "src": "/icons/icon-192.png",

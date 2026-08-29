@@ -49,6 +49,21 @@ type JoinMessage struct {
 	UserID      string `json:"userId"`
 	UserName    string `json:"userName"`
 	AvatarColor string `json:"avatarColor"`
+	RoomID      string `json:"roomId"`
+}
+
+type CreateRoomMessage struct {
+	RoomName string `json:"roomName"`
+	Password string `json:"password,omitempty"`
+	MaxUsers int    `json:"maxUsers,omitempty"`
+}
+
+type RoomCreatedMessage struct {
+	Room *models.Room `json:"room"`
+}
+
+type RoomsListMessage struct {
+	Rooms []*models.Room `json:"rooms"`
 }
 
 type UserJoinedMessage struct {
@@ -79,11 +94,12 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 		clients: make(map[string]*Client),
 	}
 
-	room := models.NewRoom(cfg.RoomName, cfg.MaxUsers)
-	hub.rooms[cfg.RoomName] = room
+	// Создаём комнату по умолчанию
+	defaultRoom := models.NewRoom("main", cfg.MaxUsers)
+	hub.rooms["main"] = defaultRoom
 
 	log.Info().
-		Str("room", cfg.RoomName).
+		Str("room", "main").
 		Int("maxUsers", cfg.MaxUsers).
 		Msg("Created default room")
 
@@ -120,7 +136,7 @@ func (c *Client) readPump() {
 		c.Conn.Close()
 	}()
 
-	c.Conn.SetReadLimit(1024 * 1024) // 1MB max message size
+	c.Conn.SetReadLimit(1024 * 1024)
 	c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	c.Conn.SetPongHandler(func(string) error {
 		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -137,10 +153,8 @@ func (c *Client) readPump() {
 		}
 
 		if messageType == websocket.BinaryMessage {
-			// Бинарные аудио данные
 			c.handleAudioData(message)
 		} else if messageType == websocket.TextMessage {
-			// JSON сообщение
 			c.handleMessage(message)
 		}
 	}
@@ -162,12 +176,9 @@ func (c *Client) writePump() {
 				return
 			}
 
-			// Определяем тип сообщения
 			if len(message) > 0 && message[0] == '{' {
-				// JSON сообщение
 				c.Conn.WriteMessage(websocket.TextMessage, message)
 			} else {
-				// Бинарные аудио данные
 				c.Conn.WriteMessage(websocket.BinaryMessage, message)
 			}
 		case <-ticker.C:
@@ -195,6 +206,17 @@ func (c *Client) handleMessage(data []byte) {
 		}
 		c.handleJoin(joinMsg)
 
+	case "create_room":
+		var createMsg CreateRoomMessage
+		if err := json.Unmarshal(msg.Payload, &createMsg); err != nil {
+			c.Hub.log.Error().Err(err).Msg("Failed to unmarshal create room message")
+			return
+		}
+		c.handleCreateRoom(createMsg)
+
+	case "get_rooms":
+		c.handleGetRooms()
+
 	case "mute":
 		var muteMsg MuteMessage
 		if err := json.Unmarshal(msg.Payload, &muteMsg); err != nil {
@@ -209,22 +231,22 @@ func (c *Client) handleMessage(data []byte) {
 }
 
 func (c *Client) handleJoin(msg JoinMessage) {
-	c.Hub.log.Info().
-		Str("userId", msg.UserID).
-		Str("userName", msg.UserName).
-		Msg("User joining room")
+	roomID := msg.RoomID
+	if roomID == "" {
+		roomID = "main"
+	}
+
+	room := c.Hub.getRoom(roomID)
+	if room == nil {
+		c.sendError("Room not found")
+		return
+	}
 
 	user := &models.User{
 		ID:          msg.UserID,
 		Name:        msg.UserName,
 		AvatarColor: msg.AvatarColor,
 		JoinedAt:    time.Now(),
-	}
-
-	room := c.Hub.getRoom()
-	if room == nil {
-		c.sendError("Room not found")
-		return
 	}
 
 	if err := room.AddUser(user); err != nil {
@@ -235,7 +257,13 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.User = user
 	c.Room = room
 
-	// Отправляем текущее состояние комнаты
+	c.Hub.log.Info().
+		Str("userId", user.ID).
+		Str("userName", user.Name).
+		Str("room", room.Name).
+		Msg("User joined room")
+
+	// Отправляем состояние комнаты
 	roomState := RoomStateMessage{
 		Users: room.GetUsers(),
 	}
@@ -247,23 +275,44 @@ func (c *Client) handleJoin(msg JoinMessage) {
 			client.sendJSON("user_joined", UserJoinedMessage{User: user})
 		}
 	}
+}
+
+func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
+	roomID := generateRoomID(msg.RoomName)
+
+	room := models.NewRoom(msg.RoomName, msg.MaxUsers)
+	if room == nil {
+		c.sendError("Failed to create room")
+		return
+	}
+
+	c.Hub.mu.Lock()
+	c.Hub.rooms[roomID] = room
+	c.Hub.mu.Unlock()
 
 	c.Hub.log.Info().
-		Str("userId", user.ID).
-		Str("room", room.Name).
-		Int("totalUsers", room.Count()).
-		Msg("User joined room")
+		Str("roomId", roomID).
+		Str("roomName", msg.RoomName).
+		Msg("Room created")
+
+	c.sendJSON("room_created", RoomCreatedMessage{Room: room})
+}
+
+func (c *Client) handleGetRooms() {
+	c.Hub.mu.RLock()
+	var rooms []*models.Room
+	for _, room := range c.Hub.rooms {
+		rooms = append(rooms, room)
+	}
+	c.Hub.mu.RUnlock()
+
+	c.sendJSON("rooms_list", RoomsListMessage{Rooms: rooms})
 }
 
 func (c *Client) handleMute(msg MuteMessage) {
 	c.mu.Lock()
 	c.IsMuted = msg.IsMuted
 	c.mu.Unlock()
-
-	c.Hub.log.Debug().
-		Str("userId", c.User.ID).
-		Bool("isMuted", msg.IsMuted).
-		Msg("User mute state changed")
 }
 
 func (c *Client) handleAudioData(audioData []byte) {
@@ -279,7 +328,6 @@ func (c *Client) handleAudioData(audioData []byte) {
 		return
 	}
 
-	// Пересылаем аудио всем остальным клиентам в комнате
 	for _, client := range c.Hub.getClientsInRoom(c.Room.ID) {
 		if client.ID == c.ID {
 			continue
@@ -288,7 +336,6 @@ func (c *Client) handleAudioData(audioData []byte) {
 		select {
 		case client.Send <- audioData:
 		default:
-			// Буфер полон, пропускаем пакет
 		}
 	}
 }
@@ -322,10 +369,10 @@ func (c *Client) sendError(message string) {
 	c.sendJSON("error", ErrorMessage{Message: message})
 }
 
-func (h *Hub) getRoom() *models.Room {
+func (h *Hub) getRoom(roomID string) *models.Room {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.rooms[h.cfg.RoomName]
+	return h.rooms[roomID]
 }
 
 func (h *Hub) getClientsInRoom(roomID string) []*Client {
@@ -366,7 +413,7 @@ func (h *Hub) removeClient(client *Client) {
 }
 
 func (h *Hub) GetRoomUserCount() int {
-	room := h.getRoom()
+	room := h.getRoom("main")
 	if room == nil {
 		return 0
 	}
@@ -382,4 +429,8 @@ func (h *Hub) Close() {
 	for _, client := range h.clients {
 		client.Conn.Close()
 	}
+}
+
+func generateRoomID(roomName string) string {
+	return "room_" + uuid.New().String()[:8]
 }

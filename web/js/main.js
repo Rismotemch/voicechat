@@ -3,7 +3,7 @@ if (window.voiceChatApp) {
     console.warn('VoiceChat app already loaded');
 } else {
     window.voiceChatApp = true;
-    
+
     const state = {
         ws: null,
         user: null,
@@ -23,6 +23,164 @@ if (window.voiceChatApp) {
         sampleRate: 48000,
         bufferSize: 960 // 20ms при 48kHz
     };
+
+    // Выбор комнаты
+    let selectedRoomId = null;
+    let selectedRoomName = null;
+
+    // DOM элементы для комнат
+    const roomElements = {
+        roomSelectionPanel: document.getElementById('roomSelectionPanel'),
+        roomsList: document.getElementById('roomsList'),
+        newRoomName: document.getElementById('newRoomName'),
+        createRoomBtn: document.getElementById('createRoomBtn'),
+        selectedRoomInfo: document.getElementById('selectedRoomInfo'),
+        backToRoomsBtn: document.getElementById('backToRoomsBtn'),
+        footerControls: document.getElementById('footerControls')
+    };
+
+    // Добавим обработчики
+    if (roomElements.createRoomBtn) {
+        roomElements.createRoomBtn.addEventListener('click', createRoom);
+    }
+    if (roomElements.backToRoomsBtn) {
+        roomElements.backToRoomsBtn.addEventListener('click', showRoomSelection);
+    }
+
+    // Функции для работы с комнатами
+    function showRoomSelection() {
+        elements.connectionPanel.style.display = 'none';
+        elements.participantsGrid.style.display = 'none';
+        roomElements.footerControls.style.display = 'none';
+        roomElements.roomSelectionPanel.style.display = 'block';
+
+        // Запрашиваем список комнат
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            sendJSONMessage('get_rooms', {});
+        }
+    }
+
+    function selectRoom(roomId, roomName) {
+        selectedRoomId = roomId;
+        selectedRoomName = roomName;
+
+        roomElements.roomSelectionPanel.style.display = 'none';
+        elements.connectionPanel.style.display = 'block';
+
+        if (roomElements.selectedRoomInfo) {
+            roomElements.selectedRoomInfo.innerHTML = `<strong>Комната:</strong> ${roomName}`;
+        }
+    }
+
+    async function createRoom() {
+        const roomName = roomElements.newRoomName.value.trim();
+        if (!roomName) {
+            alert('Введите название комнаты');
+            return;
+        }
+
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            // Подключаемся к WebSocket если не подключены
+            await connectWebSocket();
+        }
+
+        sendJSONMessage('create_room', {
+            roomName: roomName,
+            maxUsers: 25
+        });
+
+        roomElements.newRoomName.value = '';
+    }
+
+    function handleRoomCreated(payload) {
+        console.log('Room created:', payload.room);
+        // Обновляем список комнат
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            sendJSONMessage('get_rooms', {});
+        }
+    }
+
+    function handleRoomsList(payload) {
+        if (!payload.rooms || !roomElements.roomsList) return;
+
+        roomElements.roomsList.innerHTML = '';
+
+        payload.rooms.forEach(room => {
+            const roomCard = document.createElement('div');
+            roomCard.className = 'room-card';
+
+            const roomName = document.createElement('div');
+            roomName.className = 'room-name';
+            roomName.textContent = room.name;
+
+            const userCount = document.createElement('div');
+            userCount.className = 'room-users';
+            userCount.textContent = `👥 ${room.users ? Object.keys(room.users).length : 0} участников`;
+
+            roomCard.appendChild(roomName);
+            roomCard.appendChild(userCount);
+
+            roomCard.addEventListener('click', () => {
+                selectRoom(room.id, room.name);
+            });
+
+            roomElements.roomsList.appendChild(roomCard);
+        });
+    }
+
+    // Настройки
+    function setupSettingsListeners() {
+        const micSensitivity = document.getElementById('micSensitivity');
+        const micSensitivityValue = document.getElementById('micSensitivityValue');
+        const masterVolume = document.getElementById('masterVolume');
+        const masterVolumeValue = document.getElementById('masterVolumeValue');
+        const noiseSuppression = document.getElementById('noiseSuppression');
+        const echoCancellation = document.getElementById('echoCancellation');
+
+        if (micSensitivity) {
+            micSensitivity.addEventListener('input', (e) => {
+                const value = parseInt(e.target.value);
+                micSensitivityValue.textContent = value + '%';
+
+                // Применяем чувствительность микрофона
+                if (state.audioContext && state.compressor) {
+                    state.compressor.threshold.value = -30 + (value - 100) * 0.1;
+                }
+            });
+        }
+
+        if (masterVolume) {
+            masterVolume.addEventListener('input', (e) => {
+                const value = parseInt(e.target.value);
+                masterVolumeValue.textContent = value + '%';
+
+                // Применяем общую громкость
+                state.masterVolume = value / 100;
+            });
+        }
+
+        if (noiseSuppression) {
+            noiseSuppression.addEventListener('change', (e) => {
+                state.noiseSuppressionEnabled = e.target.checked;
+                // Перезапускаем микрофон с новыми настройками
+                if (state.isJoined) {
+                    stopMicrophone();
+                    startMicrophone();
+                }
+            });
+        }
+
+        if (echoCancellation) {
+            echoCancellation.addEventListener('change', (e) => {
+                state.echoCancellationEnabled = e.target.checked;
+                // Перезапускаем микрофон с новыми настройками
+                if (state.isJoined) {
+                    stopMicrophone();
+                    startMicrophone();
+                }
+            });
+        }
+    }
 
     const elements = {
         connectionPanel: document.getElementById('connectionPanel'),
@@ -64,26 +222,26 @@ if (window.voiceChatApp) {
                 latencyHint: 'interactive'
             });
         }
-        
+
         if (state.audioContext.state === 'suspended') {
             await state.audioContext.resume();
         }
-        
+
         // Создаём цепочку обработки
         state.processingChain = [];
-        
+
         // 1. Эквалайзер (3 полосы)
         const eq = createEqualizer();
         state.processingChain.push(...eq);
-        
+
         // 2. Компрессор
         const compressor = createCompressor();
         state.processingChain.push(compressor);
-        
+
         // 3. Noise Gate
         const noiseGate = createNoiseGate();
         state.processingChain.push(noiseGate);
-        
+
         // 4. Эхоподавление
         const echoCanceller = createEchoCanceller();
         state.processingChain.push(echoCanceller);
@@ -91,14 +249,14 @@ if (window.voiceChatApp) {
 
     function createEqualizer() {
         const filters = [];
-        
+
         // High-pass filter для удаления низкочастотного шума
         const highpass = state.audioContext.createBiquadFilter();
         highpass.type = 'highpass';
         highpass.frequency.value = 100;
         highpass.Q.value = 0.7;
         filters.push(highpass);
-        
+
         // Presence boost для чёткости речи
         const presence = state.audioContext.createBiquadFilter();
         presence.type = 'peaking';
@@ -106,14 +264,14 @@ if (window.voiceChatApp) {
         presence.Q.value = 1.5;
         presence.gain.value = 4;
         filters.push(presence);
-        
+
         // De-essing для уменьшения свистящих
         const deEsser = state.audioContext.createBiquadFilter();
         deEsser.type = 'notch';
         deEsser.frequency.value = 6000;
         deEsser.Q.value = 2;
         filters.push(deEsser);
-        
+
         return filters;
     }
 
@@ -130,17 +288,17 @@ if (window.voiceChatApp) {
     function createNoiseGate() {
         const noiseGate = state.audioContext.createScriptProcessor(512, 1, 1);
         const threshold = 0.003;
-        
+
         noiseGate.onaudioprocess = (event) => {
             const input = event.inputBuffer.getChannelData(0);
             const output = event.outputBuffer.getChannelData(0);
-            
+
             let sum = 0;
             for (let i = 0; i < input.length; i++) {
                 sum += input[i] * input[i];
             }
             const rms = Math.sqrt(sum / input.length);
-            
+
             if (rms < threshold) {
                 output.fill(0);
             } else {
@@ -151,7 +309,7 @@ if (window.voiceChatApp) {
                 }
             }
         };
-        
+
         return noiseGate;
     }
 
@@ -167,7 +325,7 @@ if (window.voiceChatApp) {
 
     async function startMicrophone() {
         await initAudioProcessing();
-        
+
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: true,
@@ -179,41 +337,41 @@ if (window.voiceChatApp) {
             },
             video: false
         });
-        
+
         const source = state.audioContext.createMediaStreamSource(state.microphoneStream);
-        
+
         // Подключаем цепочку обработки
         let currentNode = source;
         for (const processor of state.processingChain) {
             currentNode.connect(processor);
             currentNode = processor;
         }
-        
+
         // Создаём анализатор для VAD
         const analyser = state.audioContext.createAnalyser();
         analyser.fftSize = 512;
         analyser.smoothingTimeConstant = 0.8;
         currentNode.connect(analyser);
-        
+
         // Создаём процессор для отправки
         state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
-        
+
         state.audioProcessor.onaudioprocess = (event) => {
             if (!state.isJoined || state.isMuted) return;
-            
+
             const audioData = event.inputBuffer.getChannelData(0);
-            
+
             // VAD - проверяем уровень
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteTimeDomainData(dataArray);
-            
+
             let sum = 0;
             for (let i = 0; i < dataArray.length; i++) {
                 const value = (dataArray[i] - 128) / 128;
                 sum += value * value;
             }
             const rms = Math.sqrt(sum / dataArray.length);
-            
+
             if (rms < state.speakingThreshold) {
                 // Отправляем маркер тишины (1 байт)
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
@@ -222,23 +380,23 @@ if (window.voiceChatApp) {
             } else {
                 // Конвертируем в PCM 16-bit
                 const pcmData = floatToPCM16Optimized(audioData);
-                
+
                 // Добавляем заголовок (1 байт - тип данных, 2 байта - длина)
                 const header = new Uint8Array(3);
                 header[0] = 1; // Тип: аудио
                 header[1] = (pcmData.byteLength >> 8) & 0xFF;
                 header[2] = pcmData.byteLength & 0xFF;
-                
+
                 const combined = new Uint8Array(header.length + pcmData.byteLength);
                 combined.set(header);
                 combined.set(new Uint8Array(pcmData), header.length);
-                
+
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                     state.ws.send(combined.buffer);
                 }
             }
         };
-        
+
         analyser.connect(state.audioProcessor);
         state.audioProcessor.connect(state.audioContext.destination);
     }
@@ -257,9 +415,9 @@ if (window.voiceChatApp) {
 
     function playRemoteAudio(userId, data) {
         if (!state.audioContext) return;
-        
+
         const dataArray = new Uint8Array(data);
-        
+
         // Проверяем тип данных
         if (dataArray[0] === 0) {
             // Тишина
@@ -267,19 +425,19 @@ if (window.voiceChatApp) {
             updateSpeakingIndicator(userId, false);
             return;
         }
-        
+
         if (dataArray[0] === 1) {
             // Аудио данные
             const length = (dataArray[1] << 8) | dataArray[2];
             const pcmData = dataArray.slice(3, 3 + length);
-            
+
             const int16Array = new Int16Array(pcmData.buffer);
             const float32Array = new Float32Array(int16Array.length);
-            
+
             for (let i = 0; i < int16Array.length; i++) {
                 float32Array[i] = int16Array[i] / 32768.0;
             }
-            
+
             // Проверяем, говорит ли пользователь
             const rms = Math.sqrt(float32Array.reduce((sum, val) => sum + val * val, 0) / float32Array.length);
             if (rms > state.speakingThreshold) {
@@ -289,19 +447,19 @@ if (window.voiceChatApp) {
                 state.speakingUsers.delete(userId);
                 updateSpeakingIndicator(userId, false);
             }
-            
+
             // Применяем индивидуальную громкость
             const volume = state.volumeLevels.get(userId) || 1.0;
-            
+
             const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, state.sampleRate);
             audioBuffer.getChannelData(0).set(float32Array);
-            
+
             const source = state.audioContext.createBufferSource();
             source.buffer = audioBuffer;
-            
+
             const gainNode = state.audioContext.createGain();
             gainNode.gain.value = volume;
-            
+
             source.connect(gainNode);
             gainNode.connect(state.audioContext.destination);
             source.start();
@@ -357,7 +515,7 @@ if (window.voiceChatApp) {
 
             state.isJoined = true;
             console.log('Joined room as', userName);
-            
+
         } catch (error) {
             console.error('Failed to join room:', error);
             alert('Не удалось подключиться к микрофону: ' + error.message);
@@ -368,10 +526,10 @@ if (window.voiceChatApp) {
         return new Promise((resolve, reject) => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
-            
+
             state.ws = new WebSocket(wsUrl);
             state.ws.binaryType = 'arraybuffer';
-            
+
             state.ws.onopen = () => {
                 console.log('WebSocket connected');
                 sendJSONMessage('join', {
@@ -381,7 +539,7 @@ if (window.voiceChatApp) {
                 });
                 resolve();
             };
-            
+
             state.ws.onmessage = (event) => {
                 if (typeof event.data === 'string') {
                     handleJSONMessage(event.data);
@@ -389,12 +547,12 @@ if (window.voiceChatApp) {
                     playRemoteAudio('remote', event.data);
                 }
             };
-            
+
             state.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 reject(error);
             };
-            
+
             state.ws.onclose = () => {
                 console.log('WebSocket disconnected');
                 if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
@@ -487,23 +645,23 @@ if (window.voiceChatApp) {
 
     function addParticipantToUI(user, isSelf = false) {
         if (state.participants.has(user.id)) return;
-        
+
         const card = document.createElement('div');
         card.className = 'participant-card glass';
         card.id = `participant-${user.id}`;
-        
+
         const avatar = document.createElement('div');
         avatar.className = 'avatar';
         avatar.style.background = user.avatarColor || generateRandomColor();
         avatar.textContent = (user.name || 'U').charAt(0).toUpperCase();
-        
+
         const name = document.createElement('div');
         name.className = 'participant-name';
         name.textContent = isSelf ? `${user.name} (Вы)` : user.name;
-        
+
         card.appendChild(avatar);
         card.appendChild(name);
-        
+
         if (!isSelf) {
             const volumeControl = document.createElement('input');
             volumeControl.type = 'range';
@@ -517,7 +675,7 @@ if (window.voiceChatApp) {
             });
             card.appendChild(volumeControl);
         }
-        
+
         elements.participantsGrid.appendChild(card);
         state.participants.set(user.id, { user, card, isSelf });
     }

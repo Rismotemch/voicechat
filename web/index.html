@@ -3,12 +3,15 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#121212">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Voice Chat</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="manifest" href="manifest.json">
-    <link rel="icon" href="icons/icon-192.png" type="image/png">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
 </head>
 
 <body>
@@ -17,7 +20,6 @@
         <header class="header">
             <div class="header-left">
                 <h1 class="logo">🎙️ VoiceChat</h1>
-                <span class="room-name">Комната: main</span>
             </div>
             <div class="header-right">
                 <button id="settingsBtn" class="icon-btn" title="Настройки">⚙️</button>
@@ -26,24 +28,38 @@
 
         <!-- Main content -->
         <main class="main-content">
+            <!-- Room Selection Panel -->
+            <div id="roomSelectionPanel" class="room-selection-panel glass">
+                <h2>Выберите комнату</h2>
+                <div id="roomsList" class="rooms-list">
+                    <!-- Комнаты будут добавлены здесь -->
+                </div>
+                <div class="create-room-form">
+                    <input type="text" id="newRoomName" placeholder="Название новой комнаты" maxlength="30">
+                    <button id="createRoomBtn" class="primary-btn">Создать комнату</button>
+                </div>
+            </div>
+
             <!-- Connection panel -->
-            <div id="connectionPanel" class="connection-panel glass">
-                <h2>Присоединиться к разговору</h2>
+            <div id="connectionPanel" class="connection-panel glass" style="display: none;">
+                <h2>Присоединиться</h2>
+                <div id="selectedRoomInfo" class="selected-room-info"></div>
                 <div class="input-group">
                     <label for="userName">Ваше имя:</label>
                     <input type="text" id="userName" placeholder="Введите имя" maxlength="30">
                 </div>
                 <button id="joinBtn" class="primary-btn">Присоединиться</button>
+                <button id="backToRoomsBtn" class="secondary-btn">← Назад к комнатам</button>
             </div>
 
             <!-- Participants grid -->
             <div id="participantsGrid" class="participants-grid" style="display: none;">
-                <!-- Participant cards will be added here -->
+                <!-- Участники будут добавлены здесь -->
             </div>
         </main>
 
-        <!-- Footer -->
-        <footer class="footer">
+        <!-- Footer controls -->
+        <footer class="footer" id="footerControls" style="display: none;">
             <div class="controls">
                 <button id="micBtn" class="control-btn" title="Микрофон">🎤</button>
                 <button id="leaveBtn" class="control-btn danger" title="Покинуть">📞</button>
@@ -51,17 +67,43 @@
         </footer>
     </div>
 
-    <!-- Modals -->
+    <!-- Settings Modal -->
     <div id="settingsModal" class="modal" style="display: none;">
         <div class="modal-content glass">
             <h3>Настройки</h3>
-            <!-- Settings content will be added -->
+
+            <div class="settings-section">
+                <h4>Микрофон</h4>
+                <label for="micSensitivity">Чувствительность:</label>
+                <input type="range" id="micSensitivity" min="0" max="200" value="100">
+                <span id="micSensitivityValue">100%</span>
+            </div>
+
+            <div class="settings-section">
+                <h4>Звук</h4>
+                <label for="masterVolume">Общая громкость:</label>
+                <input type="range" id="masterVolume" min="0" max="200" value="100">
+                <span id="masterVolumeValue">100%</span>
+            </div>
+
+            <div class="settings-section">
+                <h4>Обработка</h4>
+                <label>
+                    <input type="checkbox" id="noiseSuppression" checked>
+                    Шумоподавление
+                </label>
+                <label>
+                    <input type="checkbox" id="echoCancellation" checked>
+                    Эхоподавление
+                </label>
+            </div>
+
             <button id="closeSettingsBtn" class="primary-btn">Закрыть</button>
         </div>
     </div>
 
     <script src="js/main.js"></script>
-    <script src="js/audio.js"></script>
+    <script src="js/pwa.js"></script>
 </body>
 
 </html>
