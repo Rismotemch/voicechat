@@ -20,7 +20,7 @@ if (window.voiceChatApp) {
         speakingThreshold: 0.005,
         speakingUsers: new Set(),
         sampleRate: 48000,
-        bufferSize: 2048, // Исправлено: 2048 для Safari
+        bufferSize: 2048,
         masterVolume: 1.0,
         noiseSuppressionEnabled: true,
         echoCancellationEnabled: true
@@ -185,7 +185,7 @@ if (window.voiceChatApp) {
     }
 
     function createNoiseGate() {
-        const noiseGate = state.audioContext.createScriptProcessor(2048, 1, 1);
+        const noiseGate = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
         const threshold = 0.003;
 
         noiseGate.onaudioprocess = (event) => {
@@ -238,8 +238,7 @@ if (window.voiceChatApp) {
         analyser.smoothingTimeConstant = 0.8;
         currentNode.connect(analyser);
 
-        // Используем 2048 для Safari
-        state.audioProcessor = state.audioContext.createScriptProcessor(2048, 1, 1);
+        state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
 
         state.audioProcessor.onaudioprocess = (event) => {
             if (!state.isJoined || state.isMuted) return;
@@ -369,7 +368,7 @@ if (window.voiceChatApp) {
         localStorage.setItem('voicechat_username', userName);
 
         try {
-            // Создаём пользователя ДО подключения
+            // Создаём пользователя до всех операций
             state.user = {
                 id: 'user_' + Math.random().toString(36).substring(2, 11),
                 name: userName,
@@ -413,10 +412,8 @@ if (window.voiceChatApp) {
                         avatarColor: state.user.avatarColor,
                         roomId: selectedRoomId || 'main'
                     });
-                    resolve();
-                } else {
-                    reject(new Error('User not initialized'));
                 }
+                resolve();
             };
 
             state.ws.onmessage = (event) => {
