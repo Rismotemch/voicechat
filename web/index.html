@@ -33,7 +33,7 @@
 
         <!-- Основная рабочая область -->
         <main class="main-content">
-            <!-- 1. Панель выбора и создания комнат -->
+            <!-- 1. Панель выбора комнат -->
             <div id="roomSelectionPanel" class="room-selection-panel glass">
                 <h2>Голосовые комнаты</h2>
                 <div id="roomsList" class="rooms-list">
@@ -43,7 +43,7 @@
                 <button id="refreshRoomsBtn" class="secondary-btn">🔄 Обновить список</button>
             </div>
 
-            <!-- 2. Панель подключения к выбранной комнате -->
+            <!-- 2. Панель подключения к комнате -->
             <div id="connectionPanel" class="connection-panel glass" style="display: none;">
                 <h2>Вход в комнату</h2>
                 <div id="selectedRoomInfo" class="selected-room-info"></div>
@@ -51,9 +51,19 @@
                 <button id="backToRoomsBtn" class="secondary-btn">← К списку комнат</button>
             </div>
 
-            <!-- 3. Сетка участников голосового чата -->
+            <!-- 3. Панель действий: Инвайты и Хост-контроль -->
+            <div id="hostControlsBar" class="host-controls-bar glass" style="display: none;">
+                <button id="shareInviteBtn" class="action-chip" title="Скопировать ссылку для приглашения">🔗
+                    Пригласить</button>
+                <button id="lockRoomBtn" class="action-chip" title="Закрыть вход в комнату" style="display: none;">🔓
+                    Открыта</button>
+                <button id="muteAllBtn" class="action-chip danger" title="Заглушить всех собеседников"
+                    style="display: none;">🔇 Заглушить всех</button>
+            </div>
+
+            <!-- 4. Сетка участников голосового чата -->
             <div id="participantsGrid" class="participants-grid" style="display: none;">
-                <!-- Карточки участников (громкость, аватар, VAD-индикатор) -->
+                <!-- Карточки участников с холстами визуализатора генерируются в main.js -->
             </div>
         </main>
 
@@ -80,7 +90,7 @@
 
             <div class="settings-section">
                 <h4>Микрофон</h4>
-                <label for="micSensitivity">Порог срабатывания (VAD):</label>
+                <label for="micSensitivity">Чувствительность микрофона:</label>
                 <div class="range-wrapper">
                     <input type="range" id="micSensitivity" min="0" max="200" value="100">
                     <span id="micSensitivityValue">100%</span>
@@ -148,7 +158,7 @@
         </div>
     </div>
 
-    <!-- Клиентские скрипты приложения -->
+    <!-- Скрипты клиентского приложения -->
     <script src="js/audio.js"></script>
     <script src="js/main.js"></script>
     <script src="js/pwa.js"></script>
