@@ -3,15 +3,16 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#121212">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0f">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>Voice Chat</title>
+    <title>VoiceChat — Голосовой сервер</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="manifest" href="manifest.json">
     <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -19,127 +20,114 @@
 
 <body>
     <div id="app">
-        <!-- Header -->
+        <!-- Верхняя панель (Header) -->
         <header class="header">
             <div class="header-left">
                 <h1 class="logo">🎙️ VoiceChat</h1>
                 <span id="currentRoomLabel" class="room-name">Выберите комнату</span>
             </div>
             <div class="header-right">
-                <button id="settingsBtn" class="icon-btn" title="Настройки">⚙️</button>
+                <button id="settingsBtn" class="icon-btn" title="Настройки" aria-label="Настройки">⚙️</button>
             </div>
         </header>
 
-        <!-- Main content -->
+        <!-- Основная рабочая область -->
         <main class="main-content">
-            <!-- Room Selection Panel -->
+            <!-- 1. Панель выбора и создания комнат -->
             <div id="roomSelectionPanel" class="room-selection-panel glass">
-                <h2>Выберите комнату</h2>
+                <h2>Голосовые комнаты</h2>
                 <div id="roomsList" class="rooms-list">
-                    <!-- Комнаты будут добавлены здесь -->
+                    <!-- Список комнат генерируется динамически через JS -->
                 </div>
-                <button id="refreshRoomsBtn" class="secondary-btn">🔄 Обновить список</button>
                 <button id="createRoomBtn" class="primary-btn">➕ Создать комнату</button>
+                <button id="refreshRoomsBtn" class="secondary-btn">🔄 Обновить список</button>
             </div>
 
-            <!-- Connection panel -->
+            <!-- 2. Панель подключения к выбранной комнате -->
             <div id="connectionPanel" class="connection-panel glass" style="display: none;">
-                <h2>Присоединиться</h2>
+                <h2>Вход в комнату</h2>
                 <div id="selectedRoomInfo" class="selected-room-info"></div>
-                <button id="joinBtn" class="primary-btn">Присоединиться</button>
-                <button id="backToRoomsBtn" class="secondary-btn">← Назад к комнатам</button>
+                <button id="joinBtn" class="primary-btn">Подключиться</button>
+                <button id="backToRoomsBtn" class="secondary-btn">← К списку комнат</button>
             </div>
 
-            <!-- Participants grid -->
+            <!-- 3. Сетка участников голосового чата -->
             <div id="participantsGrid" class="participants-grid" style="display: none;">
-                <!-- Участники будут добавлены здесь -->
+                <!-- Карточки участников (громкость, аватар, VAD-индикатор) -->
             </div>
         </main>
 
-        <!-- Footer controls -->
+        <!-- Нижняя панель управления звонком -->
         <footer class="footer" id="footerControls" style="display: none;">
             <div class="controls">
-                <button id="micBtn" class="control-btn" title="Микрофон">🎤</button>
-                <button id="leaveBtn" class="control-btn danger" title="Покинуть">📞</button>
+                <button id="micBtn" class="control-btn" title="Включить/Выключить микрофон"
+                    aria-label="Микрофон">🎤</button>
+                <button id="leaveBtn" class="control-btn danger" title="Покинуть комнату" aria-label="Выйти">📞</button>
             </div>
         </footer>
     </div>
 
-    <!-- Settings Modal -->
+    <!-- Модальное окно: Настройки -->
     <div id="settingsModal" class="modal" style="display: none;">
         <div class="modal-content glass">
-            <h3>Настройки</h3>
+            <h3>Настройки звука и профиля</h3>
 
             <div class="settings-section">
                 <h4>Профиль</h4>
-                <label for="settingsUserName">Ваше имя:</label>
-                <input type="text" id="settingsUserName" placeholder="Введите имя" maxlength="30">
+                <label for="settingsUserName">Отображаемое имя:</label>
+                <input type="text" id="settingsUserName" placeholder="Ваше имя" maxlength="30" autocomplete="off">
             </div>
 
             <div class="settings-section">
                 <h4>Микрофон</h4>
-                <label for="micSensitivity">Чувствительность:</label>
-                <input type="range" id="micSensitivity" min="0" max="200" value="100">
-                <span id="micSensitivityValue">100%</span>
+                <label for="micSensitivity">Порог срабатывания (VAD):</label>
+                <div class="range-wrapper">
+                    <input type="range" id="micSensitivity" min="0" max="200" value="100">
+                    <span id="micSensitivityValue">100%</span>
+                </div>
             </div>
 
             <div class="settings-section">
-                <h4>Звук</h4>
-                <label for="masterVolume">Общая громкость:</label>
-                <input type="range" id="masterVolume" min="0" max="200" value="100">
-                <span id="masterVolumeValue">100%</span>
+                <h4>Вывод звука</h4>
+                <label for="masterVolume">Общая громкость собеседников:</label>
+                <div class="range-wrapper">
+                    <input type="range" id="masterVolume" min="0" max="200" value="100">
+                    <span id="masterVolumeValue">100%</span>
+                </div>
             </div>
 
             <div class="settings-section">
-                <h4>Обработка</h4>
-                <label>
-                    <input type="checkbox" id="noiseSuppression" checked>
-                    Шумоподавление
-                </label>
-                <label>
+                <h4>Клиентские опции</h4>
+                <label class="checkbox-label">
                     <input type="checkbox" id="echoCancellation" checked>
-                    Эхоподавление
+                    Аппаратное эхоподавление браузера
                 </label>
+                <small class="hint-text">*Шумоподавление, VAD и AGC обрабатываются на Go-сервере.</small>
             </div>
 
-            <button id="closeSettingsBtn" class="primary-btn">Сохранить и закрыть</button>
+            <button id="closeSettingsBtn" class="primary-btn">Сохранить</button>
         </div>
     </div>
 
-    <!-- Create Room Modal -->
+    <!-- Модальное окно: Создание комнаты -->
     <div id="createRoomModal" class="modal" style="display: none;">
         <div class="modal-content glass">
             <h3>Создание комнаты</h3>
 
             <div class="settings-section">
                 <label for="roomNameInput">Название комнаты:</label>
-                <input type="text" id="roomNameInput" placeholder="Например: Игровая" maxlength="30">
+                <input type="text" id="roomNameInput" placeholder="Например: Игровая" maxlength="30" autocomplete="off">
             </div>
 
             <div class="settings-section">
-                <label for="roomPasswordInput">Пароль (необязательно):</label>
-                <input type="password" id="roomPasswordInput" placeholder="Пароль" maxlength="50">
+                <label for="roomPasswordInput">Пароль (оставьте пустым для открытой):</label>
+                <input type="password" id="roomPasswordInput" placeholder="Пароль доступа" maxlength="50"
+                    autocomplete="new-password">
             </div>
 
             <div class="settings-section">
-                <label for="roomMaxUsersInput">Максимум участников:</label>
-                <input type="number" id="roomMaxUsersInput" min="2" max="100" value="25">
-            </div>
-
-            <div class="settings-section">
-                <h4>Особые режимы</h4>
-                <label>
-                    <input type="checkbox" id="catInBagMode">
-                    🐱 Режим "Кот в мешке" (случайные голосовые фильтры)
-                </label>
-                <label>
-                    <input type="checkbox" id="spatialAudioMode">
-                    🔊 Пространственное аудио
-                </label>
-                <label>
-                    <input type="checkbox" id="highQualityMode">
-                    🎵 Высокое качество звука
-                </label>
+                <label for="roomMaxUsersInput">Максимум участников (макс. 10):</label>
+                <input type="number" id="roomMaxUsersInput" min="2" max="10" value="10">
             </div>
 
             <button id="confirmCreateRoomBtn" class="primary-btn">Создать</button>
@@ -147,12 +135,12 @@
         </div>
     </div>
 
-    <!-- Password Modal -->
+    <!-- Модальное окно: Ввод пароля к комнате -->
     <div id="passwordModal" class="modal" style="display: none;">
         <div class="modal-content glass">
-            <h3>Введите пароль</h3>
+            <h3>Защищенная комната</h3>
             <div class="settings-section">
-                <label for="roomPasswordCheckInput">Пароль для комнаты:</label>
+                <label for="roomPasswordCheckInput">Введите пароль для входа:</label>
                 <input type="password" id="roomPasswordCheckInput" placeholder="Пароль" maxlength="50">
             </div>
             <button id="confirmPasswordBtn" class="primary-btn">Войти</button>
@@ -160,7 +148,8 @@
         </div>
     </div>
 
-    <script src="js/audio-processor.js"></script>
+    <!-- Клиентские скрипты приложения -->
+    <script src="js/audio.js"></script>
     <script src="js/main.js"></script>
     <script src="js/pwa.js"></script>
 </body>

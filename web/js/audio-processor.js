@@ -1,135 +1,78 @@
-class NeuralAudioProcessor {
+/**
+ * VoiceChat High-Performance Audio Worklet Processors
+ * File: web/js/audio-processor.js
+ * 
+ * Runs in a dedicated audio rendering thread (AudioWorkletGlobalScope).
+ * Zero garbage collection overhead, real-time PCM16 quantization and streaming.
+ */
+
+// =============================================================================
+// 1. Capture Processor (Mic Float32 -> Int16 PCM 20ms Frames)
+// =============================================================================
+class VoiceCaptureProcessor extends AudioWorkletProcessor {
     constructor() {
-        this.isInitialized = false;
-        this.vadThreshold = 0.01;
-        this.denoiser = null;
-        this.initPromise = null;
+        super();
+        this.frameSize = 320; // 20ms при 16000 Hz (16000 * 0.02)
+        this.accumulator = new Float32Array(this.frameSize);
+        this.accumulatedSamples = 0;
+        this.isMuted = false;
+
+        this.port.onmessage = (event) => {
+            if (event.data && typeof event.data.isMuted === 'boolean') {
+                this.isMuted = event.data.isMuted;
+            }
+        };
     }
 
-    async init() {
-        if (this.isInitialized) return true;
-        if (this.initPromise) return this.initPromise;
-
-        this.initPromise = this._loadRNNoise();
-        return this.initPromise;
-    }
-
-    async _loadRNNoise() {
-        try {
-            const module = await import('https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-sync.js');
-
-            let RNNoiseClass = module.default || module.RNNoise;
-
-            if (!RNNoiseClass) {
-                throw new Error('RNNoise class not found');
-            }
-
-            this.denoiser = new RNNoiseClass();
-
-            // Ждём готовности WASM
-            if (this.denoiser.ready) {
-                await this.denoiser.ready;
-            }
-
-            this.isInitialized = true;
-            console.log('✅ RNNoise initialized successfully');
+    process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        if (!input || input.length === 0) {
             return true;
-        } catch (error) {
-            console.warn('⚠️ RNNoise initialization failed:', error.message);
-            this.isInitialized = false;
-            this.denoiser = null;
-            return false;
-        }
-    }
-
-    processAudio(float32Array) {
-        if (!this.denoiser || !this.isInitialized) {
-            return float32Array;
         }
 
-        try {
-            const frameSize = 480;
-            const output = new Float32Array(float32Array.length);
+        const channelData = input[0];
+        const inputLen = channelData.length;
 
-            for (let i = 0; i < float32Array.length; i += frameSize) {
-                const chunk = float32Array.slice(i, i + frameSize);
+        if (this.isMuted) {
+            this.accumulatedSamples = 0;
+            return true;
+        }
 
-                if (chunk.length === frameSize) {
-                    let denoised = null;
+        let readOffset = 0;
 
-                    try {
-                        // Пробуем разные методы
-                        if (typeof this.denoiser.process === 'function') {
-                            denoised = this.denoiser.process(chunk);
-                        } else if (typeof this.denoiser._rnnoise_process_frame === 'function') {
-                            // Используем WASM функцию напрямую
-                            denoised = this._processWithWASM(chunk);
-                        } else if (typeof this.denoiser.filter === 'function') {
-                            denoised = this.denoiser.filter(chunk);
-                        }
-                    } catch (e) {
-                        denoised = chunk;
-                    }
+        while (readOffset < inputLen) {
+            const needed = this.frameSize - this.accumulatedSamples;
+            const available = inputLen - readOffset;
+            const toCopy = Math.min(needed, available);
 
-                    if (denoised) {
-                        for (let j = 0; j < chunk.length; j++) {
-                            output[i + j] = denoised[j];
-                        }
-                    } else {
-                        for (let j = 0; j < chunk.length; j++) {
-                            output[i + j] = chunk[j];
-                        }
-                    }
-                } else {
-                    // Неполный кадр — копируем как есть
-                    for (let j = 0; j < chunk.length; j++) {
-                        output[i + j] = chunk[j];
-                    }
-                }
+            this.accumulator.set(
+                channelData.subarray(readOffset, readOffset + toCopy),
+                this.accumulatedSamples
+            );
+
+            this.accumulatedSamples += toCopy;
+            readOffset += toCopy;
+
+            if (this.accumulatedSamples >= this.frameSize) {
+                this.flushFrame();
+                this.accumulatedSamples = 0;
             }
-
-            return output;
-        } catch (e) {
-            console.warn('RNNoise processing failed:', e);
-            return float32Array;
         }
+
+        return true;
     }
 
-    _processWithWASM(float32Chunk) {
-        // Конвертируем Float32 в Int16
-        const pcm16 = new Int16Array(480);
-        for (let i = 0; i < 480; i++) {
-            const s = Math.max(-1, Math.min(1, float32Chunk[i]));
-            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    flushFrame() {
+        const pcm16 = new Int16Array(this.frameSize);
+        for (let i = 0; i < this.frameSize; i++) {
+            // Hard clamp [-1.0, 1.0] для предотвращения переполнения разрядности Int16
+            const sample = Math.max(-1.0, Math.min(1.0, this.accumulator[i]));
+            pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
         }
 
-        // Выделяем память в WASM
-        const ptr = this.denoiser._malloc(480 * 2);
-        this.denoiser.HEAP16.set(pcm16, ptr / 2);
-
-        // Обрабатываем
-        this.denoiser._rnnoise_process_frame(ptr, ptr);
-
-        // Получаем результат
-        const result = new Float32Array(480);
-        for (let i = 0; i < 480; i++) {
-            result[i] = this.denoiser.HEAP16[ptr / 2 + i] / 32768.0;
-        }
-
-        // Освобождаем память
-        this.denoiser._free(ptr);
-
-        return result;
-    }
-
-    detectVoice(float32Array) {
-        let sum = 0;
-        for (let i = 0; i < float32Array.length; i++) {
-            sum += float32Array[i] * float32Array[i];
-        }
-        const rms = Math.sqrt(sum / float32Array.length);
-        return rms > this.vadThreshold;
+        // Передаем ArrayBuffer с передачей владения (Transferable Objects) без копирования памяти
+        this.port.postMessage(pcm16.buffer, [pcm16.buffer]);
     }
 }
 
-window.neuralAudioProcessor = new NeuralAudioProcessor();
+registerProcessor('voice-capture-processor', VoiceCaptureProcessor);

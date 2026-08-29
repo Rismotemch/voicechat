@@ -5,21 +5,41 @@ services:
       dockerfile: Dockerfile
     container_name: voicechat
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "8080:8080"
     environment:
+      # Серверные параметры
       - PORT=8080
       - DOMAIN=voice.repozis.ru
       - ENVIRONMENT=production
-      - ROOM_NAME=main
-      - MAX_USERS=25
-      - UDP_MIN=50000
-      - UDP_MAX=51000
-      - STUN_SERVERS=stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302
-      - TURN_SERVERS=turn:voice.repozis.ru:3478
+
+      # Настройки голосовых комнат и DSP
+      - DEFAULT_ROOM_NAME=main
+      - MAX_USERS=10
+      - AUDIO_SAMPLE_RATE=16000
+      - AUDIO_FRAME_MS=20
+
+      # Безопасность
       - REQUIRE_AUTH=false
-      - LOG_LEVEL=debug
+      - ALLOW_ORIGIN=*
+
+      # Логирование
+      - LOG_LEVEL=info
       - LOG_FORMAT=json
+
+      # Хранилище
       - UPLOAD_PATH=/app/data/uploads
-      - MAX_UPLOAD_SIZE=104857600
+      - MAX_UPLOAD_SIZE=52428800 # 50 MB
     volumes:
       - ./data:/app/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
