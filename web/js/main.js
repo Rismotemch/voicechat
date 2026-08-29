@@ -431,31 +431,64 @@ if (window.voiceChatApp) {
     }
 
     // ---------- WebSocket ----------
-    function connectWebSocket() {
+    async function connectWebSocket() {
         if (state.ws && (state.ws.readyState === WebSocket.OPEN || state.ws.readyState === WebSocket.CONNECTING)) {
             return Promise.resolve();
         }
+
         return new Promise((resolve, reject) => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
+
             state.ws = new WebSocket(wsUrl);
             state.ws.binaryType = 'arraybuffer';
+
             state.ws.onopen = () => {
                 console.log('WebSocket connected');
+                state.reconnectAttempts = 0;
                 resolve();
             };
+
             state.ws.onmessage = (event) => {
-                if (typeof event.data === 'string') handleJSONMessage(event.data);
-                else if (event.data instanceof ArrayBuffer) playRemoteAudio(null, event.data);
+                if (typeof event.data === 'string') {
+                    handleJSONMessage(event.data);
+                } else if (event.data instanceof ArrayBuffer) {
+                    playRemoteAudio(null, event.data);
+                }
             };
+
             state.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 reject(error);
             };
+
             state.ws.onclose = () => {
                 console.log('WebSocket disconnected');
-                if (state.isJoined) leaveRoom();
                 state.ws = null;
+
+                // Автоматическое переподключение
+                if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
+                    state.reconnectAttempts++;
+                    console.log(`Reconnecting... Attempt ${state.reconnectAttempts}`);
+                    setTimeout(() => {
+                        connectWebSocket().then(() => {
+                            // Повторно отправляем join
+                            if (state.user && state.isJoined) {
+                                const joinPayload = {
+                                    userId: state.user.id,
+                                    userName: state.user.name,
+                                    avatarColor: state.user.avatarColor,
+                                    roomId: selectedRoomId,
+                                };
+                                if (currentRoomPassword) joinPayload.password = currentRoomPassword;
+                                sendJSONMessage('join', joinPayload);
+                            }
+                        }).catch(() => { });
+                    }, 2000);
+                } else if (state.isJoined) {
+                    alert('Соединение потеряно');
+                    leaveRoom();
+                }
             };
         });
     }
