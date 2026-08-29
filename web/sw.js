@@ -5,7 +5,7 @@
  * Provides offline shell caching, instant updates, and asset management.
  */
 
-const CACHE_NAME = 'voicechat-v4.2.7';
+const CACHE_NAME = 'voicechat-v4.2.8';
 
 // Полный реестр статических ассетов приложения
 const PRECACHE_ASSETS = [
