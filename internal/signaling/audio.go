@@ -18,7 +18,7 @@ const (
 	HighPassCutoffFreq = 80.0  // Частота среза High-Pass фильтра в Гц
 	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
 	VADEnergyThreshold = 0.008 // Минимальный порог RMS для детекции речи
-	VADHangoverFrames  = 10    // Удержание VAD (10 фреймов = 200 мс)
+	VADHangoverFrames  = 25    // Удержание VAD (10 фреймов = 200 мс)
 	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
 	MaxGainMultiplier  = 3.0   // Максимальное усиление слабого сигнала
 )

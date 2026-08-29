@@ -203,7 +203,18 @@ class AudioManager {
      * @param {ArrayBuffer} arrayBuffer
      */
     // Метод проигрывания пакета с мягким 1-мс фейдом на границах:
-    playAudioPacket(arrayBuffer) {
+    async playAudioPacket(arrayBuffer) {
+        if (!this.audioCtx) return;
+
+        // Автоматически будим AudioContext, если он уснул
+        if (this.audioCtx.state === 'suspended') {
+            try {
+                await this.audioCtx.resume();
+            } catch (e) {
+                return;
+            }
+        }
+
         if (!this.audioCtx || this.audioCtx.state !== 'running') return;
 
         const dataView = new DataView(arrayBuffer);
