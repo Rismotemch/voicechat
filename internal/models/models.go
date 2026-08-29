@@ -12,6 +12,7 @@ import (
 const (
 	DefaultMaxUsers        = 10
 	MaxAllowedUsersPerRoom = 10
+	MaxChatHistory         = 50 // Лимит хранения сообщений в оперативной памяти комнаты
 )
 
 var (
@@ -21,6 +22,52 @@ var (
 	ErrUserNotFound      = errors.New("user not found")
 	ErrUnauthorized      = errors.New("action not permitted: not room host")
 )
+
+// =============================================================================
+// ChatMessage: Модель текстового сообщения и обмена файлами
+// =============================================================================
+
+type ChatMessage struct {
+	ID          string    `json:"id"`
+	RoomID      string    `json:"roomId"`
+	UserID      string    `json:"userId"`
+	UserName    string    `json:"userName"`
+	AvatarColor string    `json:"avatarColor"`
+	Content     string    `json:"content,omitempty"`
+	FileURL     string    `json:"fileUrl,omitempty"`
+	FileName    string    `json:"fileName,omitempty"`
+	FileSize    int64     `json:"fileSize,omitempty"`
+	FileType    string    `json:"fileType,omitempty"` // "text", "image", "audio", "file"
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+func NewChatMessage(roomID, userID, userName, avatarColor, content string) *ChatMessage {
+	return &ChatMessage{
+		ID:          "msg_" + uuid.New().String()[:8],
+		RoomID:      roomID,
+		UserID:      userID,
+		UserName:    userName,
+		AvatarColor: avatarColor,
+		Content:     content,
+		FileType:    "text",
+		Timestamp:   time.Now().UTC(),
+	}
+}
+
+func NewFileChatMessage(roomID, userID, userName, avatarColor, fileURL, fileName, fileType string, fileSize int64) *ChatMessage {
+	return &ChatMessage{
+		ID:          "msg_" + uuid.New().String()[:8],
+		RoomID:      roomID,
+		UserID:      userID,
+		UserName:    userName,
+		AvatarColor: avatarColor,
+		FileURL:     fileURL,
+		FileName:    fileName,
+		FileSize:    fileSize,
+		FileType:    fileType,
+		Timestamp:   time.Now().UTC(),
+	}
+}
 
 // =============================================================================
 // User: Модель участника голосовой комнаты
@@ -35,6 +82,7 @@ type User struct {
 	IsSpeaking  bool      `json:"isSpeaking"`
 	IsHost      bool      `json:"isHost"`
 	PingMs      int       `json:"pingMs"`
+	VoiceFilter string    `json:"voiceFilter"` // "none", "radio", "robot", "megaphone", "demon"
 }
 
 func NewUser(id, name, avatarColor string) *User {
@@ -47,6 +95,7 @@ func NewUser(id, name, avatarColor string) *User {
 		IsSpeaking:  false,
 		IsHost:      false,
 		PingMs:      0,
+		VoiceFilter: "none",
 	}
 }
 
@@ -61,15 +110,15 @@ type Room struct {
 	HostID           string           `json:"hostId"`
 	IsLocked         bool             `json:"isLocked"`
 	Users            map[string]*User `json:"users"`
+	Messages         []*ChatMessage   `json:"messages"`
 	MaxUsers         int              `json:"maxUsers"`
-	Password         string           `json:"-"` // Пароль никогда не сериализуется в JSON
+	Password         string           `json:"-"`
 	CatInBagMode     bool             `json:"catInBagMode,omitempty"`
 	SpatialAudioMode bool             `json:"spatialAudioMode,omitempty"`
 	HighQualityMode  bool             `json:"highQualityMode,omitempty"`
 	CreatedAt        time.Time        `json:"createdAt"`
 }
 
-// NewRoom создает новую изолированную комнату
 func NewRoom(name string, maxUsers int) *Room {
 	if maxUsers <= 0 || maxUsers > MaxAllowedUsersPerRoom {
 		maxUsers = DefaultMaxUsers
@@ -81,12 +130,13 @@ func NewRoom(name string, maxUsers int) *Room {
 		HostID:    "",
 		IsLocked:  false,
 		Users:     make(map[string]*User),
+		Messages:  make([]*ChatMessage, 0, MaxChatHistory),
 		MaxUsers:  maxUsers,
 		CreatedAt: time.Now().UTC(),
 	}
 }
 
-// AddUser добавляет пользователя в комнату с проверкой лимита и блокировки
+// AddUser добавляет пользователя в комнату
 func (r *Room) AddUser(user *User) error {
 	if user == nil || user.ID == "" {
 		return errors.New("invalid user payload")
@@ -95,17 +145,14 @@ func (r *Room) AddUser(user *User) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Проверка на блокировку комнаты
 	if r.IsLocked && len(r.Users) > 0 {
 		return ErrRoomLocked
 	}
 
-	// Проверка лимита мест
 	if len(r.Users) >= r.MaxUsers {
 		return ErrRoomFull
 	}
 
-	// Если хоста еще нет (первый вошедший), назначаем его хостом
 	if r.HostID == "" {
 		r.HostID = user.ID
 		user.IsHost = true
@@ -117,14 +164,13 @@ func (r *Room) AddUser(user *User) error {
 	return nil
 }
 
-// RemoveUser удаляет пользователя и при необходимости передает права хоста следующему
+// RemoveUser удаляет пользователя и передает права хоста при необходимости
 func (r *Room) RemoveUser(userID string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	delete(r.Users, userID)
 
-	// Если комнату покинул хост, выбираем нового среди оставшихся
 	var newHostID string
 	if r.HostID == userID {
 		r.HostID = ""
@@ -139,21 +185,52 @@ func (r *Room) RemoveUser(userID string) string {
 	return newHostID
 }
 
-// IsUserHost проверяет, является ли пользователь администратором комнаты
+// AddMessage добавляет сообщение в кольцевой буфер истории чата
+func (r *Room) AddMessage(msg *ChatMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if len(r.Messages) >= MaxChatHistory {
+		r.Messages = r.Messages[1:]
+	}
+	r.Messages = append(r.Messages, msg)
+}
+
+// GetMessages возвращает копию среза сообщений чата
+func (r *Room) GetMessages() []*ChatMessage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	history := make([]*ChatMessage, len(r.Messages))
+	copy(history, r.Messages)
+	return history
+}
+
+// SetUserVoiceFilter обновляет текущий активный DSP-фильтр пользователя
+func (r *Room) SetUserVoiceFilter(userID, filter string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if user, exists := r.Users[userID]; exists {
+		user.VoiceFilter = filter
+	}
+}
+
+// IsUserHost проверяет, является ли пользователь создателем/хостом
 func (r *Room) IsUserHost(userID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.HostID != "" && r.HostID == userID
 }
 
-// SetLocked устанавливает статус блокировки входа в комнату
+// SetLocked блокирует или разблокирует вход в комнату
 func (r *Room) SetLocked(locked bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.IsLocked = locked
 }
 
-// GetUser возвращает копию ссылки на пользователя по ID
+// GetUser возвращает пользователя по ID
 func (r *Room) GetUser(userID string) (*User, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -161,7 +238,7 @@ func (r *Room) GetUser(userID string) (*User, bool) {
 	return user, exists
 }
 
-// UpdateUserPing обновляет значение задержки участника
+// UpdateUserPing обновляет пинг участника
 func (r *Room) UpdateUserPing(userID string, pingMs int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -170,7 +247,7 @@ func (r *Room) UpdateUserPing(userID string, pingMs int) {
 	}
 }
 
-// GetUsers возвращает срез всех текущих участников
+// GetUsers возвращает срез всех участников
 func (r *Room) GetUsers() []*User {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -182,21 +259,21 @@ func (r *Room) GetUsers() []*User {
 	return users
 }
 
-// Count возвращает текущее число участников
+// Count возвращает количество участников
 func (r *Room) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.Users)
 }
 
-// HasPassword проверяет, защищена ли комната паролем
+// HasPassword проверяет наличие пароля
 func (r *Room) HasPassword() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.Password != ""
 }
 
-// VerifyPassword сверяет пароль
+// VerifyPassword проверяет валидность пароля
 func (r *Room) VerifyPassword(password string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -206,7 +283,7 @@ func (r *Room) VerifyPassword(password string) bool {
 	return r.Password == password
 }
 
-// MarshalJSON обеспечивает потокобезопасную сериализацию без состояния гонки при чтении map
+// MarshalJSON потокобезопасно сериализует комнату
 func (r *Room) MarshalJSON() ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

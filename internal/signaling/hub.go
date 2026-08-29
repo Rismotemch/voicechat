@@ -2,7 +2,12 @@ package signaling
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,12 +19,12 @@ import (
 )
 
 const (
-	// WebSocket тайминги
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 512 * 1024 // 512 KB
-	sendChannelCap = 512        // Емкость канала исходящих сообщений
+	sendChannelCap = 512
+	maxChatTextLen = 2000
 )
 
 var upgrader = websocket.Upgrader{
@@ -53,7 +58,7 @@ func (c *Client) closeSendChannel() {
 }
 
 // =============================================================================
-// Hub: Менеджер комнат, маршрутизации и аудио-хабов
+// Hub: Маршрутизатор комнат, чата и медиа-потоков
 // =============================================================================
 
 type Hub struct {
@@ -74,7 +79,6 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 		clients:   make(map[string]*Client),
 	}
 
-	// Инициализация дефолтной комнаты 'main'
 	defaultRoom := models.NewRoom("main", cfg.MaxUsers)
 	defaultRoom.ID = "main"
 	hub.rooms["main"] = defaultRoom
@@ -105,8 +109,77 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.readPump()
 }
 
+// HandleUpload принимает multipart-файлы для обмена в текстовом микро-чате
+func (h *Hub) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	maxSize := h.cfg.MaxUploadSize
+	if maxSize <= 0 {
+		maxSize = 50 << 20 // 50 MB по умолчанию
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+
+	if err := r.ParseMultipartForm(maxSize); err != nil {
+		h.log.Warn().Err(err).Msg("File upload size exceeded limit")
+		http.Error(w, `{"error":"File size exceeds maximum allowed limit"}`, http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, `{"error":"Missing file in payload"}`, http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	if err := os.MkdirAll(h.cfg.UploadPath, 0755); err != nil {
+		h.log.Error().Err(err).Msg("Failed to create upload directory")
+		http.Error(w, `{"error":"Internal storage error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	uniqueFileName := fmt.Sprintf("%s_%s%s", time.Now().Format("20060102150405"), uuid.New().String()[:8], ext)
+	dstPath := filepath.Join(h.cfg.UploadPath, uniqueFileName)
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to save uploaded file")
+		http.Error(w, `{"error":"Failed to save file"}`, http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	written, err := io.Copy(dst, file)
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to write file stream")
+		http.Error(w, `{"error":"File write error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Определение базовой категории типа файла
+	fileType := "file"
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg":
+		fileType = "image"
+	case ".mp3", ".wav", ".ogg", ".m4a":
+		fileType = "audio"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"url":      "/uploads/" + uniqueFileName,
+		"fileName": header.Filename,
+		"fileSize": written,
+		"fileType": fileType,
+	})
+}
+
 // =============================================================================
-// I/O Pumps (Goroutines)
+// I/O Pumps
 // =============================================================================
 
 func (c *Client) readPump() {
@@ -176,7 +249,7 @@ func (c *Client) writePump() {
 }
 
 // =============================================================================
-// Сигнальные структуры сообщений
+// Сигнальные структуры
 // =============================================================================
 
 type Message struct {
@@ -230,8 +303,23 @@ type MuteAllMessage struct {
 	IsMuted bool `json:"isMuted"`
 }
 
+type SendChatMessage struct {
+	Content string `json:"content"`
+}
+
+type SendFileMessage struct {
+	FileURL  string `json:"fileUrl"`
+	FileName string `json:"fileName"`
+	FileType string `json:"fileType"`
+	FileSize int64  `json:"fileSize"`
+}
+
+type SetVoiceFilterMessage struct {
+	Filter string `json:"filter"`
+}
+
 // =============================================================================
-// Обработка текстовых сообщений
+// Обработка текстовых команд и чата
 // =============================================================================
 
 func (c *Client) handleTextMessage(data []byte) {
@@ -270,6 +358,25 @@ func (c *Client) handleTextMessage(data []byte) {
 	case "get_rooms":
 		c.handleGetRooms()
 
+	// --- Микро-чат и файлы ---
+	case "send_message":
+		var p SendChatMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleSendMessage(p)
+		}
+	case "send_file":
+		var p SendFileMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleSendFile(p)
+		}
+
+	// --- Голосовые DSP-фильтры ---
+	case "set_voice_filter":
+		var p SetVoiceFilterMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleSetVoiceFilter(p)
+		}
+
 	// --- Телеметрия (RTT / Ping) ---
 	case "ping":
 		var p PingMessage
@@ -282,7 +389,7 @@ func (c *Client) handleTextMessage(data []byte) {
 			c.handlePingReport(p)
 		}
 
-	// --- Администрирование комнат (Host Controls) ---
+	// --- Хост-контроль ---
 	case "kick_user":
 		var p KickUserMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
@@ -352,14 +459,14 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.AudioClient = audioClient
 	c.mu.Unlock()
 
-	// 1. Отправляем полное состояние комнаты вошедшему
+	// Отправляем состояние комнаты вместе с историей сообщений чата
 	c.sendJSON("room_state", map[string]interface{}{
 		"users":    room.GetUsers(),
+		"messages": room.GetMessages(),
 		"hostId":   room.HostID,
 		"isLocked": room.IsLocked,
 	})
 
-	// 2. Оповещаем остальных участников
 	c.Hub.broadcastToRoom(room.ID, "user_joined", map[string]interface{}{
 		"user": user,
 	}, c.ID)
@@ -396,6 +503,84 @@ func (c *Client) handleLeave(msg LeaveMessage) {
 	if newHostID != "" {
 		c.Hub.broadcastToRoom(room.ID, "host_changed", map[string]interface{}{
 			"hostId": newHostID,
+		}, "")
+	}
+}
+
+func (c *Client) handleSendMessage(msg SendChatMessage) {
+	text := strings.TrimSpace(msg.Content)
+	if text == "" {
+		return
+	}
+	if len(text) > maxChatTextLen {
+		text = text[:maxChatTextLen]
+	}
+
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil {
+		return
+	}
+
+	chatMsg := models.NewChatMessage(room.ID, user.ID, user.Name, user.AvatarColor, text)
+	room.AddMessage(chatMsg)
+
+	c.Hub.broadcastToRoom(room.ID, "chat_message", chatMsg, "")
+}
+
+func (c *Client) handleSendFile(msg SendFileMessage) {
+	if msg.FileURL == "" || msg.FileName == "" {
+		return
+	}
+
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil {
+		return
+	}
+
+	chatMsg := models.NewFileChatMessage(room.ID, user.ID, user.Name, user.AvatarColor, msg.FileURL, msg.FileName, msg.FileType, msg.FileSize)
+	room.AddMessage(chatMsg)
+
+	c.Hub.broadcastToRoom(room.ID, "chat_message", chatMsg, "")
+}
+
+func (c *Client) handleSetVoiceFilter(msg SetVoiceFilterMessage) {
+	validFilters := map[string]bool{
+		"none":      true,
+		"radio":     true,
+		"robot":     true,
+		"megaphone": true,
+		"demon":     true,
+	}
+
+	filter := strings.ToLower(msg.Filter)
+	if !validFilters[filter] {
+		filter = "none"
+	}
+
+	c.mu.Lock()
+	if c.AudioClient != nil {
+		c.AudioClient.SetVoiceFilter(filter)
+	}
+	if c.User != nil {
+		c.User.VoiceFilter = filter
+	}
+	room := c.Room
+	user := c.User
+	c.mu.Unlock()
+
+	if room != nil && user != nil {
+		room.SetUserVoiceFilter(user.ID, filter)
+		c.Hub.broadcastToRoom(room.ID, "user_filter_updated", map[string]interface{}{
+			"userId":      user.ID,
+			"voiceFilter": filter,
 		}, "")
 	}
 }
@@ -474,7 +659,7 @@ func (c *Client) handleGetRooms() {
 }
 
 // =============================================================================
-// Пинг и качество связи (Telemetry)
+// Пинг и Телеметрия
 // =============================================================================
 
 func (c *Client) handlePing(msg PingMessage) {
@@ -503,7 +688,7 @@ func (c *Client) handlePingReport(msg PingReportMessage) {
 }
 
 // =============================================================================
-// Администрирование комнат (Хост-контроль)
+// Хост-контроль
 // =============================================================================
 
 func (c *Client) handleKickUser(msg KickUserMessage) {
@@ -595,7 +780,7 @@ func (c *Client) handleMuteAll(msg MuteAllMessage) {
 }
 
 // =============================================================================
-// Аудио и вспомогательные функции
+// Вспомогательные методы
 // =============================================================================
 
 func (c *Client) handleAudioData(audioData []byte) {

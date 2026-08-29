@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,114 +14,103 @@ import (
 	"github.com/rismotemch/voicechat/internal/signaling"
 )
 
-const (
-	shutdownTimeout   = 10 * time.Second
-	readHeaderTimeout = 5 * time.Second
-	idleTimeout       = 120 * time.Second
-)
-
 func main() {
-	// 1. Загрузка конфигурации
+	// 1. Загрузка конфигурации окружения
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: Failed to load config: %v\n", err)
+		fmt.Printf("Fatal: failed to load configuration: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 2. Инициализация структурированного логгера
+	// 2. Инициализация структурированного логгера (zerolog)
 	log := logger.New(cfg.LogLevel, cfg.LogFormat)
-
 	log.Info().
 		Str("environment", cfg.Environment).
 		Int("port", cfg.Port).
-		Str("domain", cfg.Domain).
-		Msg("Initializing VoiceChat Server Engine...")
+		Int("maxUsersPerRoom", cfg.MaxUsers).
+		Int64("maxUploadSize", cfg.MaxUploadSize).
+		Msg("Starting VoiceChat DSP server")
 
-	// 3. Создание сигнального и аудио-маршрутизатора
+	// 3. Создание директории для загруженных файлов
+	if err := os.MkdirAll(cfg.UploadPath, 0755); err != nil {
+		log.Fatal().Err(err).Str("uploadPath", cfg.UploadPath).Msg("Failed to create upload directory")
+	}
+
+	// 4. Инициализация центрального хаба комнат и DSP-пайплайна
 	hub := signaling.NewHub(cfg, log)
 
-	// 4. Настройка HTTP-роутера
+	// 5. Настройка HTTP-роутера
 	mux := http.NewServeMux()
 
 	// WebSocket аудио и сигнальный эндпоинт
 	mux.HandleFunc("/ws", hub.HandleWebSocket)
 
-	// Health Check / Метрики
+	// API загрузки файлов и изображений в микро-чат
+	mux.HandleFunc("/api/upload", hub.HandleUpload)
+
+	// Раздача сохраненных файлов чата
+	uploadsFS := http.FileServer(http.Dir(cfg.UploadPath))
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", uploadsFS))
+
+	// Healthcheck эндпоинт для Docker и мониторинга
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"status":"healthy","users":%d}`, hub.GetRoomUserCount())
+		_, _ = fmt.Fprintf(w, `{"status":"healthy","users":%d,"timestamp":%d}`, hub.GetRoomUserCount(), time.Now().Unix())
 	})
 
-	// Статические файлы веб-интерфейса
-	fs := http.FileServer(http.Dir("./web"))
-	mux.Handle("/", staticFilesMiddleware(fs))
+	// Раздача статики веб-клиента с отключением агрессивного кэширования для отладки
+	webFS := http.FileServer(http.Dir("./web"))
+	mux.Handle("/", staticFilesMiddleware(webFS))
 
-	// Раздача загруженных файлов (если используется путь аватарок/файлов)
-	if cfg.UploadPath != "" {
-		if _, err := os.Stat(cfg.UploadPath); os.IsNotExist(err) {
-			_ = os.MkdirAll(cfg.UploadPath, 0755)
-		}
-		uploadFS := http.StripPrefix("/uploads/", http.FileServer(http.Dir(cfg.UploadPath)))
-		mux.Handle("/uploads/", uploadFS)
-	}
-
-	// 5. Конфигурация HTTP-сервера
+	// 6. Конфигурация HTTP-сервера
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           mux,
-		ReadHeaderTimeout: readHeaderTimeout,
-		IdleTimeout:       idleTimeout,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
-	// 6. Graceful Shutdown канал
-	shutdownComplete := make(chan struct{})
-
+	// 7. Запуск сервера в отдельной горутине
+	serverErrors := make(chan error, 1)
 	go func() {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-		sig := <-sigChan
-
-		log.Info().Str("signal", sig.String()).Msg("Received termination signal, shutting down gracefully...")
-
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-
-		// Остановка приема новых входящих HTTP/WS подключений
-		if err := server.Shutdown(ctx); err != nil {
-			log.Error().Err(err).Msg("HTTP server shutdown encountered an error")
-		}
-
-		// Корректное закрытие активных аудиосессий и каналов горутин
-		hub.Close()
-
-		close(shutdownComplete)
+		log.Info().Str("addr", server.Addr).Msg("HTTP server is listening")
+		serverErrors <- server.ListenAndServe()
 	}()
 
-	// 7. Запуск сервера
-	log.Info().
-		Int("port", cfg.Port).
-		Str("ws_endpoint", fmt.Sprintf("ws://%s:%d/ws", cfg.Domain, cfg.Port)).
-		Msg("VoiceChat Server successfully started")
+	// 8. Перехват сигналов завершения (Graceful Shutdown)
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
 
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal().Err(err).Msg("Server crashed unexpectedly")
+	select {
+	case err := <-serverErrors:
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("Server crashed unexpectedly")
+		}
+	case sig := <-shutdown:
+		log.Info().Str("signal", sig.String()).Msg("Shutdown signal received, starting graceful termination")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		hub.Close()
+
+		if err := server.Shutdown(ctx); err != nil {
+			log.Error().Err(err).Msg("Server forced to shutdown after timeout")
+			_ = server.Close()
+		}
+		log.Info().Msg("Server stopped gracefully")
 	}
-
-	<-shutdownComplete
-	log.Info().Msg("Server stopped completely. Goodbye.")
 }
 
-// staticFilesMiddleware добавляет базовые заголовки безопасности и отключает кэш для JS/Worklet файлов в разработке
+// staticFilesMiddleware добавляет необходимые заголовки для работы PWA и Service Worker
 func staticFilesMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
 
-		// Для корректной работы AudioWorklet без кэширования старых скриптов браузером
-		if len(r.URL.Path) >= 3 && r.URL.Path[len(r.URL.Path)-3:] == ".js" {
-			w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		if r.URL.Path == "/sw.js" || r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		}
 
 		next.ServeHTTP(w, r)

@@ -14,17 +14,17 @@ const (
 	BytesPerFrame   = 640   // 320 сэмплов * 2 байта (Int16)
 	MaxSenderIDLen  = 128   // Максимальная длина ID для заголовка пакета
 
-	// Параметры DSP
+	// Базовые параметры DSP
 	HighPassCutoffFreq = 80.0  // Частота среза High-Pass фильтра в Гц
 	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
 	VADEnergyThreshold = 0.008 // Минимальный порог RMS для детекции речи
 	VADHangoverFrames  = 10    // Удержание VAD (10 фреймов = 200 мс)
-	TargetRMS          = 0.12  // Целевой уровень RMS для компрессора/AGC
+	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
 	MaxGainMultiplier  = 3.0   // Максимальное усиление слабого сигнала
 )
 
 // =============================================================================
-// Пул буферов памяти (Zero-Allocation во время непрерывного аудиопотока)
+// Пул буферов памяти (Zero-Allocation)
 // =============================================================================
 
 var (
@@ -37,7 +37,7 @@ var (
 )
 
 // =============================================================================
-// DSP: Biquad High-Pass Filter (2-й порядок Баттерворта)
+// DSP: Универсальный Biquad Filter (HighPass, LowPass, BandPass)
 // =============================================================================
 
 type BiquadFilter struct {
@@ -56,6 +56,50 @@ func newHighPassFilter(sampleRate, cutoff, q float64) *BiquadFilter {
 	b0 := (1.0 + cosW0) / 2.0
 	b1 := -(1.0 + cosW0)
 	b2 := (1.0 + cosW0) / 2.0
+	a0 := 1.0 + alpha
+	a1 := -2.0 * cosW0
+	a2 := 1.0 - alpha
+
+	return &BiquadFilter{
+		b0: float32(b0 / a0),
+		b1: float32(b1 / a0),
+		b2: float32(b2 / a0),
+		a1: float32(a1 / a0),
+		a2: float32(a2 / a0),
+	}
+}
+
+func newLowPassFilter(sampleRate, cutoff, q float64) *BiquadFilter {
+	w0 := 2.0 * math.Pi * cutoff / sampleRate
+	cosW0 := math.Cos(w0)
+	sinW0 := math.Sin(w0)
+	alpha := sinW0 / (2.0 * q)
+
+	b0 := (1.0 - cosW0) / 2.0
+	b1 := 1.0 - cosW0
+	b2 := (1.0 - cosW0) / 2.0
+	a0 := 1.0 + alpha
+	a1 := -2.0 * cosW0
+	a2 := 1.0 - alpha
+
+	return &BiquadFilter{
+		b0: float32(b0 / a0),
+		b1: float32(b1 / a0),
+		b2: float32(b2 / a0),
+		a1: float32(a1 / a0),
+		a2: float32(a2 / a0),
+	}
+}
+
+func newBandPassFilter(sampleRate, centerFreq, q float64) *BiquadFilter {
+	w0 := 2.0 * math.Pi * centerFreq / sampleRate
+	cosW0 := math.Cos(w0)
+	sinW0 := math.Sin(w0)
+	alpha := sinW0 / (2.0 * q)
+
+	b0 := alpha
+	b1 := 0.0
+	b2 := -alpha
 	a0 := 1.0 + alpha
 	a1 := -2.0 * cosW0
 	a2 := 1.0 - alpha
@@ -88,7 +132,7 @@ func (f *BiquadFilter) Reset() {
 }
 
 // =============================================================================
-// DSP Pipeline Клиента (Фильтрация, VAD, AGC, Soft Limiting)
+// DSP Pipeline Клиента с поддержкой голосовых эффектов
 // =============================================================================
 
 type AudioProcessor struct {
@@ -96,23 +140,39 @@ type AudioProcessor struct {
 	hangoverCount int
 	isSpeaking    bool
 	currentGain   float32
+	activeFilter  string
+
+	// Дополнительные DSP узлы для спецэффектов
+	radioHPFilter *BiquadFilter
+	radioLPFilter *BiquadFilter
+	megaphoneBP   *BiquadFilter
+	demonLPFilter *BiquadFilter
+	modPhase      float64
 }
 
 func NewAudioProcessor() *AudioProcessor {
 	return &AudioProcessor{
-		hpFilter:    newHighPassFilter(SampleRate, HighPassCutoffFreq, HighPassQ),
-		currentGain: 1.0,
+		hpFilter:      newHighPassFilter(SampleRate, HighPassCutoffFreq, HighPassQ),
+		currentGain:   1.0,
+		activeFilter:  "none",
+		radioHPFilter: newHighPassFilter(SampleRate, 400.0, 0.707),
+		radioLPFilter: newLowPassFilter(SampleRate, 2600.0, 0.707),
+		megaphoneBP:   newBandPassFilter(SampleRate, 1200.0, 1.8),
+		demonLPFilter: newLowPassFilter(SampleRate, 600.0, 0.8),
 	}
 }
 
-// ProcessFrame выполняет полную цепочку улучшения голоса на PCM-сэмплах
+func (p *AudioProcessor) SetVoiceFilter(filterName string) {
+	p.activeFilter = filterName
+}
+
 func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	n := len(samples)
 	if n == 0 {
 		return false
 	}
 
-	// 1. High-Pass фильтр (удаление низкочастотного гула микрофона)
+	// 1. Базовый High-Pass фильтр (удаление 50/60Гц гула микрофона)
 	p.hpFilter.Process(samples, samples)
 
 	// 2. Расчет среднеквадратичной энергии (RMS)
@@ -122,7 +182,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. VAD с таймером Hangover для предотвращения срезания окончаний слов
+	// 3. VAD с таймером Hangover
 	if rms >= VADEnergyThreshold {
 		p.hangoverCount = VADHangoverFrames
 		p.isSpeaking = true
@@ -137,7 +197,10 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 4. AGC (Automatic Gain Control)
+	// 4. Применение спецэффектов голоса
+	p.applyVoiceEffects(samples)
+
+	// 5. AGC (Automatic Gain Control)
 	if rms > 0.001 {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
@@ -145,11 +208,10 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		} else if desiredGain < 0.5 {
 			desiredGain = 0.5
 		}
-		// Плавная интерполяция громкости без резких скачков
 		p.currentGain = p.currentGain*0.9 + desiredGain*0.1
 	}
 
-	// 5. Применение усиления и Soft Limiting (кубическая компрессия пиков)
+	// 6. Усиление и Soft Limiting (кубическая компрессия)
 	for i := 0; i < n; i++ {
 		val := samples[i] * p.currentGain
 		if val > 1.0 {
@@ -165,11 +227,77 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	return true
 }
 
+func (p *AudioProcessor) applyVoiceEffects(samples []float32) {
+	n := len(samples)
+	twoPi := 2.0 * math.Pi
+
+	switch p.activeFilter {
+	case "radio":
+		// Полосовой срез + насыщение (distortion)
+		p.radioHPFilter.Process(samples, samples)
+		p.radioLPFilter.Process(samples, samples)
+		for i := 0; i < n; i++ {
+			s := samples[i] * 2.2
+			if s > 0.8 {
+				s = 0.8
+			} else if s < -0.8 {
+				s = -0.8
+			}
+			samples[i] = s
+		}
+
+	case "robot":
+		// Ring Modulation несущей частотой 50 Гц
+		freq := 50.0
+		phaseStep := (twoPi * freq) / SampleRate
+		for i := 0; i < n; i++ {
+			carrier := float32(math.Sin(p.modPhase))
+			samples[i] = samples[i] * carrier * 1.4
+			p.modPhase += phaseStep
+			if p.modPhase > twoPi {
+				p.modPhase -= twoPi
+			}
+		}
+
+	case "megaphone":
+		// Резонансный узкополосный фильтр + жесткий клиппинг
+		p.megaphoneBP.Process(samples, samples)
+		for i := 0; i < n; i++ {
+			s := samples[i] * 3.0
+			if s > 0.6 {
+				s = 0.6
+			} else if s < -0.6 {
+				s = -0.6
+			}
+			samples[i] = s * 1.5
+		}
+
+	case "demon":
+		// Низкочастотная субмодуляция 28 Гц + срез высоких частот
+		p.demonLPFilter.Process(samples, samples)
+		freq := 28.0
+		phaseStep := (twoPi * freq) / SampleRate
+		for i := 0; i < n; i++ {
+			carrier := 0.7 + 0.3*float32(math.Sin(p.modPhase))
+			samples[i] = samples[i] * carrier * 1.8
+			p.modPhase += phaseStep
+			if p.modPhase > twoPi {
+				p.modPhase -= twoPi
+			}
+		}
+	}
+}
+
 func (p *AudioProcessor) Reset() {
 	p.hpFilter.Reset()
+	p.radioHPFilter.Reset()
+	p.radioLPFilter.Reset()
+	p.megaphoneBP.Reset()
+	p.demonLPFilter.Reset()
 	p.hangoverCount = 0
 	p.isSpeaking = false
 	p.currentGain = 1.0
+	p.modPhase = 0
 }
 
 // =============================================================================
@@ -210,6 +338,12 @@ func (c *AudioClient) GetMute() bool {
 	return c.IsMuted
 }
 
+func (c *AudioClient) SetVoiceFilter(filterName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Processor.SetVoiceFilter(filterName)
+}
+
 type AudioHub struct {
 	mu      sync.RWMutex
 	clients map[string]*AudioClient
@@ -239,7 +373,6 @@ func (h *AudioHub) GetClient(clientID string) *AudioClient {
 	return h.clients[clientID]
 }
 
-// ProcessAndBroadcast обрабатывает PCM-фрейм и рассылает его подписчикам
 func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 	if len(rawPCM) < BytesPerFrame {
 		return
@@ -253,12 +386,10 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 		return
 	}
 
-	// 1. Извлечение сэмплов из пула
 	floatBufPtr := pcmSamplePool.Get().(*[]float32)
 	floatBuf := *floatBufPtr
 	defer pcmSamplePool.Put(floatBufPtr)
 
-	// 2. Декодирование Int16 Little-Endian в Float32 [-1.0 ... 1.0]
 	sampleCount := len(rawPCM) / 2
 	if sampleCount > SamplesPerFrame {
 		sampleCount = SamplesPerFrame
@@ -269,13 +400,11 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 		floatBuf[i] = float32(rawSample) / 32768.0
 	}
 
-	// 3. Серверная обработка DSP (High-Pass, VAD, AGC, Limiter)
 	hasVoice := sender.Processor.ProcessFrame(floatBuf[:sampleCount])
 	if !hasVoice {
 		return
 	}
 
-	// 4. Формирование пакета с 2-byte alignment заголовка для клиентского Int16Array
 	userIDBytes := []byte(sender.UserID)
 	userIDLen := len(userIDBytes)
 	if userIDLen > MaxSenderIDLen {
@@ -292,11 +421,9 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 	totalPacketSize := pcmOffset + (sampleCount * 2)
 	outPacket := make([]byte, totalPacketSize)
 
-	// Заголовок пакета: [uint16 Big-Endian: UserID Len] + [UserID Bytes] + [Padding]
 	binary.BigEndian.PutUint16(outPacket[0:2], uint16(userIDLen))
 	copy(outPacket[2:2+userIDLen], userIDBytes)
 
-	// Кодирование Float32 обратно в Int16 Little-Endian с четного смещения
 	for i := 0; i < sampleCount; i++ {
 		s := floatBuf[i]
 		if s > 1.0 {
@@ -314,7 +441,6 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 		binary.LittleEndian.PutUint16(outPacket[pcmOffset+i*2:pcmOffset+i*2+2], uint16(val))
 	}
 
-	// 5. Неблокирующий Broadcast всем участникам, кроме автора фрейма
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -323,7 +449,6 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 			select {
 			case client.Send <- outPacket:
 			default:
-				// Дроп устаревшего пакета при просадке канала (защита от задержек)
 			}
 		}
 	}

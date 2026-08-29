@@ -1,6 +1,7 @@
 /**
  * VoiceChat Client Engine - web/js/main.js
- * Integrated with Host Controls, Ping/Telemetry, Live Visualizer & Invite Links.
+ * Integrated with Text Micro-Chat, File Sharing, Voice DSP Filters,
+ * Dynamic QR Code Generator, Host Controls & 60 FPS Visualizer.
  */
 
 (() => {
@@ -27,7 +28,8 @@
         isHost: false,
         isLocked: false,
 
-        // Настройки
+        // Настройки аудио и DSP
+        voiceFilter: 'none',
         echoCancellationEnabled: true,
         masterVolume: 1.0,
         micSensitivity: 100,
@@ -39,7 +41,11 @@
         pendingRoomId: null,
         pendingRoomName: null,
 
-        // Телеметрия и пинг
+        // Чат и уведомления
+        isChatOpen: false,
+        unreadCount: 0,
+
+        // Фоновые процессы
         pingInterval: null,
         visualizerAnimId: null,
 
@@ -54,54 +60,85 @@
     // Кэш DOM-элементов
     // =========================================================================
     const dom = {
-        connectionPanel: document.getElementById('connectionPanel'),
-        participantsGrid: document.getElementById('participantsGrid'),
-        joinBtn: document.getElementById('joinBtn'),
-        micBtn: document.getElementById('micBtn'),
-        leaveBtn: document.getElementById('leaveBtn'),
-        settingsBtn: document.getElementById('settingsBtn'),
-        settingsModal: document.getElementById('settingsModal'),
-        closeSettingsBtn: document.getElementById('closeSettingsBtn'),
+        // Навигация и контейнеры
+        header: document.querySelector('.header'),
+        mainContent: document.querySelector('.main-content'),
+        currentRoomLabel: document.getElementById('currentRoomLabel'),
         roomSelectionPanel: document.getElementById('roomSelectionPanel'),
         roomsList: document.getElementById('roomsList'),
         createRoomBtn: document.getElementById('createRoomBtn'),
         refreshRoomsBtn: document.getElementById('refreshRoomsBtn'),
+        connectionPanel: document.getElementById('connectionPanel'),
         selectedRoomInfo: document.getElementById('selectedRoomInfo'),
+        joinBtn: document.getElementById('joinBtn'),
         backToRoomsBtn: document.getElementById('backToRoomsBtn'),
+        callWorkspace: document.getElementById('callWorkspace'),
+        participantsGrid: document.getElementById('participantsGrid'),
         footerControls: document.getElementById('footerControls'),
-        currentRoomLabel: document.getElementById('currentRoomLabel'),
-        createRoomModal: document.getElementById('createRoomModal'),
-        confirmCreateRoomBtn: document.getElementById('confirmCreateRoomBtn'),
-        cancelCreateRoomBtn: document.getElementById('cancelCreateRoomBtn'),
-        passwordModal: document.getElementById('passwordModal'),
-        confirmPasswordBtn: document.getElementById('confirmPasswordBtn'),
-        cancelPasswordBtn: document.getElementById('cancelPasswordBtn'),
+        micBtn: document.getElementById('micBtn'),
+        leaveBtn: document.getElementById('leaveBtn'),
+        settingsBtn: document.getElementById('settingsBtn'),
+
+        // Хост-панель
+        hostControlsBar: document.getElementById('hostControlsBar'),
+        shareInviteBtn: document.getElementById('shareInviteBtn'),
+        lockRoomBtn: document.getElementById('lockRoomBtn'),
+        muteAllBtn: document.getElementById('muteAllBtn'),
+
+        // Текстовый микро-чат
+        chatToggleBtn: document.getElementById('chatToggleBtn'),
+        chatUnreadBadge: document.getElementById('chatUnreadBadge'),
+        chatPanel: document.getElementById('chatPanel'),
+        closeChatBtn: document.getElementById('closeChatBtn'),
+        chatMessages: document.getElementById('chatMessages'),
+        chatForm: document.getElementById('chatForm'),
+        chatInput: document.getElementById('chatInput'),
+        chatFileInput: document.getElementById('chatFileInput'),
+        chatAttachBtn: document.getElementById('chatAttachBtn'),
+        chatSendBtn: document.getElementById('chatSendBtn'),
+
+        // Модалка настроек
+        settingsModal: document.getElementById('settingsModal'),
+        closeSettingsBtn: document.getElementById('closeSettingsBtn'),
         settingsUserName: document.getElementById('settingsUserName'),
+        voiceFilterSelect: document.getElementById('voiceFilterSelect'),
         micSensitivity: document.getElementById('micSensitivity'),
         micSensitivityValue: document.getElementById('micSensitivityValue'),
         masterVolume: document.getElementById('masterVolume'),
         masterVolumeValue: document.getElementById('masterVolumeValue'),
         echoCancellation: document.getElementById('echoCancellation'),
+
+        // Модалка создания комнаты
+        createRoomModal: document.getElementById('createRoomModal'),
         roomNameInput: document.getElementById('roomNameInput'),
         roomPasswordInput: document.getElementById('roomPasswordInput'),
         roomMaxUsersInput: document.getElementById('roomMaxUsersInput'),
-        roomPasswordCheckInput: document.getElementById('roomPasswordCheckInput'),
+        confirmCreateRoomBtn: document.getElementById('confirmCreateRoomBtn'),
+        cancelCreateRoomBtn: document.getElementById('cancelCreateRoomBtn'),
 
-        // Элементы хост-панели и инвайтов (создаются динамически или из HTML)
-        hostControlsBar: null,
-        lockRoomBtn: null,
-        muteAllBtn: null,
-        shareInviteBtn: null
+        // Модалка ввода пароля
+        passwordModal: document.getElementById('passwordModal'),
+        roomPasswordCheckInput: document.getElementById('roomPasswordCheckInput'),
+        confirmPasswordBtn: document.getElementById('confirmPasswordBtn'),
+        cancelPasswordBtn: document.getElementById('cancelPasswordBtn'),
+
+        // Модалка QR-кода и инвайта
+        inviteModal: document.getElementById('inviteModal'),
+        inviteQrCanvas: document.getElementById('inviteQrCanvas'),
+        inviteUrlInput: document.getElementById('inviteUrlInput'),
+        copyInviteUrlBtn: document.getElementById('copyInviteUrlBtn'),
+        closeInviteModalBtn: document.getElementById('closeInviteModalBtn')
     };
 
     // =========================================================================
-    // Инициализация
+    // Инициализация приложения
     // =========================================================================
     document.addEventListener('DOMContentLoaded', () => {
         initUserProfile();
-        setupDynamicHostBar();
         bindUIEvents();
         setupAudioCallbacks();
+        setupChatDragAndDrop();
+        setupClipboardPaste();
         checkInviteUrl();
     });
 
@@ -111,46 +148,22 @@
             name = 'Гость ' + Math.floor(100 + Math.random() * 900);
             localStorage.setItem('voicechat_username', name);
         }
+
+        const savedFilter = localStorage.getItem('voicechat_filter') || 'none';
+        state.voiceFilter = savedFilter;
+
         state.user = {
             id: 'u_' + Math.random().toString(36).substring(2, 9) + Date.now().toString(36).slice(-4),
             name: name.trim(),
-            avatarColor: getRandomAvatarColor()
+            avatarColor: getRandomAvatarColor(),
+            voiceFilter: state.voiceFilter
         };
 
-        if (dom.settingsUserName) {
-            dom.settingsUserName.value = state.user.name;
-        }
-    }
-
-    function setupDynamicHostBar() {
-        // Создаем плавающую панель для хост-контроля и шеринга инвайт-ссылок
-        let bar = document.getElementById('hostControlsBar');
-        if (!bar) {
-            bar = document.createElement('div');
-            bar.id = 'hostControlsBar';
-            bar.className = 'host-controls-bar glass';
-            bar.style.display = 'none';
-
-            bar.innerHTML = `
-                <button id="shareInviteBtn" class="action-chip" title="Скопировать ссылку для приглашения">🔗 Пригласить</button>
-                <button id="lockRoomBtn" class="action-chip" title="Закрыть вход в комнату" style="display: none;">🔓 Открыта</button>
-                <button id="muteAllBtn" class="action-chip danger" title="Заглушить всех собеседников" style="display: none;">🔇 Заглушить всех</button>
-            `;
-
-            const mainContent = document.querySelector('.main-content');
-            if (mainContent) {
-                mainContent.insertBefore(bar, dom.participantsGrid);
-            }
-        }
-
-        dom.hostControlsBar = bar;
-        dom.shareInviteBtn = document.getElementById('shareInviteBtn');
-        dom.lockRoomBtn = document.getElementById('lockRoomBtn');
-        dom.muteAllBtn = document.getElementById('muteAllBtn');
+        if (dom.settingsUserName) dom.settingsUserName.value = state.user.name;
+        if (dom.voiceFilterSelect) dom.voiceFilterSelect.value = state.voiceFilter;
     }
 
     function checkInviteUrl() {
-        // Парсинг параметров инвайта: voice.repozis.ru/#join=roomId&pwd=pass
         const hash = window.location.hash.substring(1);
         if (!hash) {
             showRoomSelectionView();
@@ -165,7 +178,6 @@
             state.selectedRoomId = joinRoomId;
             state.selectedRoomName = joinRoomId;
             if (pwd) state.currentRoomPassword = pwd;
-
             selectRoom(joinRoomId, joinRoomId);
         } else {
             showRoomSelectionView();
@@ -186,24 +198,37 @@
     }
 
     function bindUIEvents() {
+        // Навигация и звонок
         if (dom.joinBtn) dom.joinBtn.addEventListener('click', () => joinRoom());
         if (dom.micBtn) dom.micBtn.addEventListener('click', () => toggleMute());
         if (dom.leaveBtn) dom.leaveBtn.addEventListener('click', () => leaveRoom());
+        if (dom.backToRoomsBtn) dom.backToRoomsBtn.addEventListener('click', () => showRoomSelectionView());
+        if (dom.refreshRoomsBtn) dom.refreshRoomsBtn.addEventListener('click', () => requestRoomsList());
+        if (dom.createRoomBtn) dom.createRoomBtn.addEventListener('click', () => openCreateRoomModal());
         if (dom.settingsBtn) dom.settingsBtn.addEventListener('click', () => openSettingsModal());
         if (dom.closeSettingsBtn) dom.closeSettingsBtn.addEventListener('click', () => saveSettings());
-        if (dom.createRoomBtn) dom.createRoomBtn.addEventListener('click', () => openCreateRoomModal());
-        if (dom.refreshRoomsBtn) dom.refreshRoomsBtn.addEventListener('click', () => requestRoomsList());
-        if (dom.backToRoomsBtn) dom.backToRoomsBtn.addEventListener('click', () => showRoomSelectionView());
+
+        // Хост-действия и инвайты
+        if (dom.shareInviteBtn) dom.shareInviteBtn.addEventListener('click', () => openInviteModal());
+        if (dom.lockRoomBtn) dom.lockRoomBtn.addEventListener('click', () => toggleLockRoom());
+        if (dom.muteAllBtn) dom.muteAllBtn.addEventListener('click', () => triggerMuteAll());
+        if (dom.closeInviteModalBtn) dom.closeInviteModalBtn.addEventListener('click', () => closeInviteModal());
+        if (dom.copyInviteUrlBtn) dom.copyInviteUrlBtn.addEventListener('click', () => copyInviteLink());
+
+        // Чат
+        if (dom.chatToggleBtn) dom.chatToggleBtn.addEventListener('click', () => toggleChatPanel());
+        if (dom.closeChatBtn) dom.closeChatBtn.addEventListener('click', () => toggleChatPanel(false));
+        if (dom.chatForm) dom.chatForm.addEventListener('submit', (e) => { e.preventDefault(); handleSendTextMessage(); });
+        if (dom.chatAttachBtn) dom.chatAttachBtn.addEventListener('click', () => dom.chatFileInput && dom.chatFileInput.click());
+        if (dom.chatFileInput) dom.chatFileInput.addEventListener('change', handleFileSelect);
+
+        // Модалки комнат
         if (dom.confirmCreateRoomBtn) dom.confirmCreateRoomBtn.addEventListener('click', () => handleCreateRoomSubmit());
         if (dom.cancelCreateRoomBtn) dom.cancelCreateRoomBtn.addEventListener('click', () => closeCreateRoomModal());
         if (dom.confirmPasswordBtn) dom.confirmPasswordBtn.addEventListener('click', () => handlePasswordSubmit());
         if (dom.cancelPasswordBtn) dom.cancelPasswordBtn.addEventListener('click', () => closePasswordModal());
 
-        // Хост-действия и инвайты
-        if (dom.shareInviteBtn) dom.shareInviteBtn.addEventListener('click', () => copyInviteLink());
-        if (dom.lockRoomBtn) dom.lockRoomBtn.addEventListener('click', () => toggleLockRoom());
-        if (dom.muteAllBtn) dom.muteAllBtn.addEventListener('click', () => triggerMuteAll());
-
+        // Ползунки
         if (dom.micSensitivity) {
             dom.micSensitivity.addEventListener('input', (e) => {
                 const val = parseInt(e.target.value, 10) || 0;
@@ -343,6 +368,12 @@
                 case 'user_updated':
                     onUserUpdated(msg.payload);
                     break;
+                case 'user_filter_updated':
+                    onUserFilterUpdated(msg.payload);
+                    break;
+                case 'chat_message':
+                    onChatMessage(msg.payload);
+                    break;
                 case 'room_created':
                     onRoomCreated(msg.payload);
                     break;
@@ -352,8 +383,6 @@
                 case 'error':
                     onServerError(msg.payload);
                     break;
-
-                // --- Телеметрия и Хост-контроль ---
                 case 'pong':
                     onPong(msg.payload);
                     break;
@@ -380,11 +409,13 @@
 
     function onRoomState(payload) {
         clearParticipantsUI();
+        clearChatUI();
 
         state.hostId = payload.hostId || null;
         state.isHost = Boolean(state.user && state.hostId === state.user.id);
         state.isLocked = Boolean(payload.isLocked);
 
+        // Восстановление списка участников
         if (Array.isArray(payload.users)) {
             payload.users.forEach(u => {
                 const isSelf = Boolean(state.user && u.id === state.user.id);
@@ -392,19 +423,30 @@
             });
         }
 
+        // Восстановление истории чата
+        if (Array.isArray(payload.messages)) {
+            payload.messages.forEach(m => {
+                const isSelf = Boolean(state.user && m.userId === state.user.id);
+                addChatMessageToUI(m, isSelf);
+            });
+        }
+
         state.isJoined = true;
         dom.connectionPanel.style.display = 'none';
-        dom.participantsGrid.style.display = 'grid';
+        dom.callWorkspace.style.display = 'flex';
         dom.footerControls.style.display = 'flex';
 
-        if (dom.hostControlsBar) {
-            dom.hostControlsBar.style.display = 'flex';
+        if (dom.chatToggleBtn) dom.chatToggleBtn.style.display = 'flex';
+        if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'flex';
+
+        // Отправка текущего активного голосового фильтра
+        if (state.voiceFilter !== 'none') {
+            sendSignaling('set_voice_filter', { filter: state.voiceFilter });
         }
 
         updateHostControlsUI();
         updateRoomLabel();
 
-        // Запуск фоновых процессов звонка
         startPingLoop();
         startVisualizerLoop();
 
@@ -442,6 +484,35 @@
             if (nameEl) {
                 const isSelf = state.user && payload.user.id === state.user.id;
                 nameEl.textContent = isSelf ? `${payload.user.name} (Вы)` : payload.user.name;
+            }
+        }
+    }
+
+    function onUserFilterUpdated(payload) {
+        const card = document.getElementById(`participant-${payload.userId}`);
+        if (card) {
+            const filterBadge = card.querySelector('.filter-badge');
+            if (filterBadge) {
+                if (payload.voiceFilter && payload.voiceFilter !== 'none') {
+                    filterBadge.textContent = getFilterLabel(payload.voiceFilter);
+                    filterBadge.style.display = 'inline-block';
+                } else {
+                    filterBadge.style.display = 'none';
+                }
+            }
+        }
+    }
+
+    function onChatMessage(payload) {
+        if (!payload) return;
+        const isSelf = Boolean(state.user && payload.userId === state.user.id);
+        addChatMessageToUI(payload, isSelf);
+
+        if (!state.isChatOpen && !isSelf) {
+            state.unreadCount++;
+            if (dom.chatUnreadBadge) {
+                dom.chatUnreadBadge.textContent = state.unreadCount;
+                dom.chatUnreadBadge.style.display = 'flex';
             }
         }
     }
@@ -506,9 +577,6 @@
         showRoomSelectionView();
     }
 
-    // =========================================================================
-    // Пинг и Хост-контроль хендлеры
-    // =========================================================================
     function onPong(payload) {
         if (!payload.clientTimestamp) return;
         const pingMs = Math.max(1, Date.now() - payload.clientTimestamp);
@@ -529,7 +597,6 @@
         state.isHost = Boolean(state.user && state.hostId === state.user.id);
         updateHostControlsUI();
 
-        // Обновляем бейджи Хоста на карточках участников
         state.participants.forEach((p, uid) => {
             const isHost = (uid === state.hostId);
             const hostBadge = p.card.querySelector('.host-badge');
@@ -556,45 +623,320 @@
         }
     }
 
-    function startPingLoop() {
-        stopPingLoop();
-        state.pingInterval = setInterval(() => {
-            if (state.isJoined && state.ws && state.ws.readyState === WebSocket.OPEN) {
-                sendSignaling('ping', { clientTimestamp: Date.now() });
-            }
-        }, 3000);
+    // =========================================================================
+    // Текстовый микро-чат и загрузка файлов
+    // =========================================================================
+    function toggleChatPanel(forceState) {
+        state.isChatOpen = (typeof forceState === 'boolean') ? forceState : !state.isChatOpen;
+        if (dom.chatPanel) {
+            dom.chatPanel.style.display = state.isChatOpen ? 'flex' : 'none';
+        }
+
+        if (state.isChatOpen) {
+            state.unreadCount = 0;
+            if (dom.chatUnreadBadge) dom.chatUnreadBadge.style.display = 'none';
+            if (dom.chatInput) dom.chatInput.focus();
+            scrollChatToBottom();
+        }
     }
 
-    function stopPingLoop() {
-        if (state.pingInterval) {
-            clearInterval(state.pingInterval);
-            state.pingInterval = null;
+    function handleSendTextMessage() {
+        if (!dom.chatInput) return;
+        const text = dom.chatInput.value.trim();
+        if (!text) return;
+
+        sendSignaling('send_message', { content: text });
+        dom.chatInput.value = '';
+    }
+
+    async function uploadAndSendFile(file) {
+        if (!file) return;
+
+        // Лимит на стороне клиента: 50MB
+        if (file.size > 50 * 1024 * 1024) {
+            alert('Файл слишком большой. Максимальный размер: 50 МБ');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const resp = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!resp.ok) {
+                throw new Error('Ошибка сервера при загрузке файла');
+            }
+
+            const data = await resp.json();
+            sendSignaling('send_file', {
+                fileUrl: data.url,
+                fileName: data.fileName,
+                fileType: data.fileType,
+                fileSize: data.fileSize
+            });
+        } catch (err) {
+            console.error('[VoiceChat] Upload failed:', err);
+            alert('Не удалось загрузить файл.');
+        }
+    }
+
+    function handleFileSelect(e) {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+            uploadAndSendFile(file);
+            e.target.value = '';
+        }
+    }
+
+    function setupClipboardPaste() {
+        document.addEventListener('paste', (e) => {
+            if (!state.isJoined) return;
+            const items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].kind === 'file') {
+                    const file = items[i].getAsFile();
+                    if (file) {
+                        toggleChatPanel(true);
+                        uploadAndSendFile(file);
+                        e.preventDefault();
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    function setupChatDragAndDrop() {
+        const dropZone = document.body;
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                if (!state.isJoined) return;
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            if (!state.isJoined) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const dt = e.dataTransfer;
+            const files = dt && dt.files;
+            if (files && files.length > 0) {
+                toggleChatPanel(true);
+                uploadAndSendFile(files[0]);
+            }
+        });
+    }
+
+    function addChatMessageToUI(msg, isSelf = false) {
+        if (!dom.chatMessages || !msg) return;
+
+        const row = document.createElement('div');
+        row.className = `chat-msg-row ${isSelf ? 'self' : 'other'}`;
+
+        if (!isSelf) {
+            const author = document.createElement('div');
+            author.className = 'chat-msg-author';
+            author.textContent = msg.userName || 'Аноним';
+            row.appendChild(author);
+        }
+
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-bubble';
+
+        // Текстовое сообщение
+        if (msg.content) {
+            const textSpan = document.createElement('span');
+            textSpan.textContent = msg.content;
+            bubble.appendChild(textSpan);
+        }
+
+        // Превью изображения
+        if (msg.fileType === 'image' && msg.fileURL) {
+            const img = document.createElement('img');
+            img.src = msg.fileURL;
+            img.alt = msg.fileName || 'Вложение';
+            img.className = 'chat-img-preview';
+            img.addEventListener('click', () => window.open(msg.fileURL, '_blank'));
+            bubble.appendChild(img);
+        }
+        // Ссылка на скачивание файла
+        else if (msg.fileURL) {
+            const fileLink = document.createElement('a');
+            fileLink.href = msg.fileURL;
+            fileLink.download = msg.fileName || 'file';
+            fileLink.target = '_blank';
+            fileLink.className = 'chat-file-attachment';
+            fileLink.innerHTML = `📄 ${escapeHTML(msg.fileName || 'Файл')} <small>(${formatBytes(msg.fileSize || 0)})</small>`;
+            bubble.appendChild(fileLink);
+        }
+
+        const timeEl = document.createElement('div');
+        timeEl.className = 'chat-msg-time';
+        const d = msg.timestamp ? new Date(msg.timestamp) : new Date();
+        timeEl.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        bubble.appendChild(timeEl);
+
+        row.appendChild(bubble);
+        dom.chatMessages.appendChild(row);
+        scrollChatToBottom();
+    }
+
+    function clearChatUI() {
+        if (dom.chatMessages) dom.chatMessages.innerHTML = '';
+        state.unreadCount = 0;
+        if (dom.chatUnreadBadge) dom.chatUnreadBadge.style.display = 'none';
+    }
+
+    function scrollChatToBottom() {
+        if (dom.chatMessages) {
+            dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
         }
     }
 
     // =========================================================================
-    // Хост-действия и Инвайты
+    // QR-код генератор и Модалка приглашения
     // =========================================================================
-    function copyInviteLink() {
+    function openInviteModal() {
         const url = new URL(window.location.origin + window.location.pathname);
         url.hash = `join=${encodeURIComponent(state.selectedRoomId)}`;
         if (state.currentRoomPassword) {
             url.hash += `&pwd=${encodeURIComponent(state.currentRoomPassword)}`;
         }
 
-        navigator.clipboard.writeText(url.toString()).then(() => {
-            if (dom.shareInviteBtn) {
-                const originalText = dom.shareInviteBtn.textContent;
-                dom.shareInviteBtn.textContent = '✓ Ссылка скопирована!';
-                setTimeout(() => {
-                    dom.shareInviteBtn.textContent = originalText;
-                }, 2000);
+        const inviteLink = url.toString();
+        if (dom.inviteUrlInput) dom.inviteUrlInput.value = inviteLink;
+
+        // Рендерим QR-код на Canvas
+        if (dom.inviteQrCanvas) {
+            renderQRCodeToCanvas(dom.inviteQrCanvas, inviteLink);
+        }
+
+        if (dom.inviteModal) dom.inviteModal.style.display = 'flex';
+    }
+
+    function closeInviteModal() {
+        if (dom.inviteModal) dom.inviteModal.style.display = 'none';
+    }
+
+    function copyInviteLink() {
+        const text = dom.inviteUrlInput ? dom.inviteUrlInput.value : '';
+        if (!text) return;
+
+        navigator.clipboard.writeText(text).then(() => {
+            if (dom.copyInviteUrlBtn) {
+                const orig = dom.copyInviteUrlBtn.textContent;
+                dom.copyInviteUrlBtn.textContent = '✓ Скопировано!';
+                setTimeout(() => { dom.copyInviteUrlBtn.textContent = orig; }, 2000);
             }
         }).catch(() => {
-            prompt('Скопируйте ссылку для приглашения:', url.toString());
+            prompt('Ссылка для приглашения:', text);
         });
     }
 
+    /**
+     * Автономный генератор QR-кода на Canvas без внешних библиотек
+     */
+    function renderQRCodeToCanvas(canvas, text) {
+        const ctx = canvas.getContext('2d');
+        const size = canvas.width;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, size, size);
+
+        // Используем встроенный генератор таблицы модулей QR
+        const qrMatrix = generateQRMatrix(text);
+        const moduleCount = qrMatrix.length;
+        const cellSize = (size - 24) / moduleCount;
+        const offset = 12;
+
+        ctx.fillStyle = '#0a0a0f';
+        for (let r = 0; r < moduleCount; r++) {
+            for (let c = 0; c < moduleCount; c++) {
+                if (qrMatrix[r][c]) {
+                    ctx.fillRect(offset + c * cellSize, offset + r * cellSize, cellSize + 0.3, cellSize + 0.3);
+                }
+            }
+        }
+    }
+
+    /**
+     * Минималистичный генератор матрицы QR-кода (Byte Mode, Mask 0)
+     */
+    function generateQRMatrix(data) {
+        const bytes = new TextEncoder().encode(data);
+        const version = bytes.length > 50 ? 5 : (bytes.length > 25 ? 3 : 2);
+        const size = version * 4 + 17;
+        const matrix = Array.from({ length: size }, () => Array(size).fill(false));
+        const isReserved = Array.from({ length: size }, () => Array(size).fill(false));
+
+        const setFinder = (r, c) => {
+            for (let i = -1; i <= 7; i++) {
+                for (let j = -1; j <= 7; j++) {
+                    const row = r + i, col = c + j;
+                    if (row >= 0 && row < size && col >= 0 && col < size) {
+                        isReserved[row][col] = true;
+                        const isBorder = i === -1 || i === 7 || j === -1 || j === 7;
+                        const isOuter = i === 0 || i === 6 || j === 0 || j === 6;
+                        const isCenter = i >= 2 && i <= 4 && j >= 2 && j <= 4;
+                        matrix[row][col] = !isBorder && (isOuter || isCenter);
+                    }
+                }
+            }
+        };
+
+        setFinder(0, 0);
+        setFinder(0, size - 7);
+        setFinder(size - 7, 0);
+
+        // Timing patterns
+        for (let i = 8; i < size - 8; i++) {
+            isReserved[6][i] = true;
+            matrix[6][i] = (i % 2 === 0);
+            isReserved[i][6] = true;
+            matrix[i][6] = (i % 2 === 0);
+        }
+
+        // Заполнение данных с маской
+        let bitIndex = 0;
+        const bits = [];
+        for (let i = 0; i < bytes.length; i++) {
+            for (let b = 7; b >= 0; b--) {
+                bits.push((bytes[i] >> b) & 1);
+            }
+        }
+
+        let right = size - 1;
+        while (right > 0) {
+            if (right === 6) right--;
+            for (let vert = 0; vert < size; vert++) {
+                for (let colOffset = 0; colOffset < 2; colOffset++) {
+                    const c = right - colOffset;
+                    const r = ((right + 1) & 2) === 0 ? size - 1 - vert : vert;
+                    if (!isReserved[r][c]) {
+                        const bit = bitIndex < bits.length ? bits[bitIndex++] : 0;
+                        const mask = (r + c) % 2 === 0;
+                        matrix[r][c] = Boolean(bit ^ (mask ? 1 : 0));
+                    }
+                }
+            }
+            right -= 2;
+        }
+
+        return matrix;
+    }
+
+    // =========================================================================
+    // Хост-действия
+    // =========================================================================
     function toggleLockRoom() {
         if (!state.isHost) return;
         const newLockState = !state.isLocked;
@@ -622,11 +964,8 @@
             dom.lockRoomBtn.textContent = state.isLocked ? '🔒 Закрыта' : '🔓 Открыта';
             dom.lockRoomBtn.classList.toggle('danger', state.isLocked);
         }
-        if (dom.muteAllBtn) {
-            dom.muteAllBtn.style.display = display;
-        }
+        if (dom.muteAllBtn) dom.muteAllBtn.style.display = display;
 
-        // Обновляем видимость кнопок Kick на карточках
         state.participants.forEach((p, uid) => {
             const kickBtn = p.card.querySelector('.kick-btn');
             if (kickBtn) {
@@ -636,7 +975,7 @@
     }
 
     // =========================================================================
-    // UI & Управление вызовами
+    // Управление вызовами и UI
     // =========================================================================
     async function joinRoom() {
         if (!state.user) initUserProfile();
@@ -646,7 +985,7 @@
             await window.audioManager.startMicrophone(state.echoCancellationEnabled);
         } catch (err) {
             console.error('[VoiceChat] Microphone access failed:', err);
-            alert('Не удалось получить доступ к микрофону. Проверьте разрешения в браузере.');
+            alert('Не удалось получить доступ к микрофону. Проверьте разрешения.');
             return;
         }
 
@@ -686,9 +1025,12 @@
         window.audioManager.stopMicrophone();
         state.isJoined = false;
         clearParticipantsUI();
+        clearChatUI();
 
+        if (dom.chatToggleBtn) dom.chatToggleBtn.style.display = 'none';
+        if (dom.chatPanel) dom.chatPanel.style.display = 'none';
         if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'none';
-        dom.participantsGrid.style.display = 'none';
+        if (dom.callWorkspace) dom.callWorkspace.style.display = 'none';
         dom.footerControls.style.display = 'none';
 
         window.location.hash = '';
@@ -712,17 +1054,21 @@
     function showRoomSelectionView() {
         closeCreateRoomModal();
         closePasswordModal();
+        closeInviteModal();
         stopPingLoop();
         stopVisualizerLoop();
         window.audioManager.stopMicrophone();
 
         state.isJoined = false;
         clearParticipantsUI();
+        clearChatUI();
 
+        if (dom.chatToggleBtn) dom.chatToggleBtn.style.display = 'none';
+        if (dom.chatPanel) dom.chatPanel.style.display = 'none';
         if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'none';
+        if (dom.callWorkspace) dom.callWorkspace.style.display = 'none';
         dom.roomSelectionPanel.style.display = 'block';
         dom.connectionPanel.style.display = 'none';
-        dom.participantsGrid.style.display = 'none';
         dom.footerControls.style.display = 'none';
 
         state.selectedRoomId = 'main';
@@ -756,6 +1102,9 @@
         if (dom.settingsUserName && state.user) {
             dom.settingsUserName.value = state.user.name;
         }
+        if (dom.voiceFilterSelect) {
+            dom.voiceFilterSelect.value = state.voiceFilter;
+        }
         if (dom.echoCancellation) {
             dom.echoCancellation.checked = state.echoCancellationEnabled;
         }
@@ -779,6 +1128,17 @@
                 localStorage.setItem('voicechat_username', newName);
                 if (state.isJoined) {
                     sendSignaling('update_profile', { userName: newName });
+                }
+            }
+        }
+
+        if (dom.voiceFilterSelect) {
+            const newFilter = dom.voiceFilterSelect.value;
+            if (newFilter !== state.voiceFilter) {
+                state.voiceFilter = newFilter;
+                localStorage.setItem('voicechat_filter', newFilter);
+                if (state.isJoined) {
+                    sendSignaling('set_voice_filter', { filter: newFilter });
                 }
             }
         }
@@ -865,7 +1225,7 @@
     }
 
     // =========================================================================
-    // Карточки участников, Телеметрия и Визуализатор волн (60 FPS)
+    // Карточки участников, Пинг и Визуализатор
     // =========================================================================
     function addParticipantToUI(user, isSelf = false) {
         if (!user || !user.id || state.participants.has(user.id)) return;
@@ -874,7 +1234,6 @@
         card.className = 'participant-card glass';
         card.id = `participant-${user.id}`;
 
-        // Кнопка Kick (для Хоста)
         const kickBtn = document.createElement('button');
         kickBtn.className = 'kick-btn';
         kickBtn.title = 'Исключить участника';
@@ -886,14 +1245,12 @@
         });
         card.appendChild(kickBtn);
 
-        // Индикатор пинга (Badge)
         const pingBadge = document.createElement('div');
         pingBadge.className = 'ping-badge ping-good';
         pingBadge.id = `ping-${user.id}`;
         pingBadge.textContent = '0ms';
         card.appendChild(pingBadge);
 
-        // Обертка аватара с холстом визуализатора волн
         const avatarWrapper = document.createElement('div');
         avatarWrapper.className = 'avatar-wrapper';
 
@@ -912,7 +1269,6 @@
         avatarWrapper.appendChild(avatar);
         card.appendChild(avatarWrapper);
 
-        // Имя и бейдж Хоста
         const nameContainer = document.createElement('div');
         nameContainer.className = 'name-container';
 
@@ -928,9 +1284,21 @@
         hostBadge.style.display = isUserHost ? 'inline-block' : 'none';
         nameContainer.appendChild(hostBadge);
 
+        const filterBadge = document.createElement('span');
+        filterBadge.className = 'host-badge filter-badge';
+        filterBadge.style.background = 'rgba(124, 108, 255, 0.15)';
+        filterBadge.style.borderColor = 'rgba(124, 108, 255, 0.3)';
+        filterBadge.style.color = '#c4b5fd';
+        if (user.voiceFilter && user.voiceFilter !== 'none') {
+            filterBadge.textContent = getFilterLabel(user.voiceFilter);
+            filterBadge.style.display = 'inline-block';
+        } else {
+            filterBadge.style.display = 'none';
+        }
+        nameContainer.appendChild(filterBadge);
+
         card.appendChild(nameContainer);
 
-        // Ползунок громкости собеседника
         if (!isSelf) {
             const volContainer = document.createElement('div');
             volContainer.className = 'range-wrapper';
@@ -1005,16 +1373,28 @@
         }
     }
 
-    // =========================================================================
-    // Отрисовка живой волны / спектра (Canvas Voice Visualizer)
-    // =========================================================================
+    function startPingLoop() {
+        stopPingLoop();
+        state.pingInterval = setInterval(() => {
+            if (state.isJoined && state.ws && state.ws.readyState === WebSocket.OPEN) {
+                sendSignaling('ping', { clientTimestamp: Date.now() });
+            }
+        }, 3000);
+    }
+
+    function stopPingLoop() {
+        if (state.pingInterval) {
+            clearInterval(state.pingInterval);
+            state.pingInterval = null;
+        }
+    }
+
     function startVisualizerLoop() {
         stopVisualizerLoop();
 
         const render = () => {
             state.participants.forEach((p, userId) => {
                 if (!p.ctx || !p.canvas) return;
-
                 const freqData = window.audioManager.getFrequencyData(p.isSelf ? 'self' : userId);
                 drawWaveVisualizer(p.ctx, p.canvas, freqData);
             });
@@ -1034,10 +1414,8 @@
 
     function drawWaveVisualizer(ctx, canvas, freqData) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
         if (!freqData || freqData.length === 0) return;
 
-        // Расчет средней энергии низких и средних частот
         let sum = 0;
         const count = Math.min(freqData.length, 16);
         for (let i = 0; i < count; i++) {
@@ -1045,7 +1423,7 @@
         }
         const avg = sum / count;
 
-        if (avg < 5) return; // Порог тишины
+        if (avg < 5) return;
 
         const centerX = canvas.width / 2;
         const centerY = canvas.height / 2;
@@ -1062,7 +1440,6 @@
         ctx.shadowColor = '#7c6cff';
         ctx.stroke();
 
-        // Дополнительное внешнее пульсирующее кольцо при громкой речи
         if (avg > 80) {
             ctx.beginPath();
             ctx.arc(centerX, centerY, baseRadius + waveScale * 1.5, 0, 2 * Math.PI);
@@ -1073,9 +1450,30 @@
         ctx.restore();
     }
 
+    // =========================================================================
+    // Вспомогательные утилиты
+    // =========================================================================
+    function getFilterLabel(filterKey) {
+        const labels = {
+            'radio': '📻 Рация',
+            'robot': '🤖 Робот',
+            'megaphone': '📢 Мегафон',
+            'demon': '😈 Демон'
+        };
+        return labels[filterKey] || filterKey;
+    }
+
     function getRandomAvatarColor() {
         const palette = ['#7c6cff', '#ff6b6b', '#51cf66', '#ffd43b', '#4dabf7', '#ff922b', '#20c997', '#f06595'];
         return palette[Math.floor(Math.random() * palette.length)];
+    }
+
+    function formatBytes(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     }
 
     function escapeHTML(str) {

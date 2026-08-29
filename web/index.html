@@ -27,6 +27,11 @@
                 <span id="currentRoomLabel" class="room-name">Выберите комнату</span>
             </div>
             <div class="header-right">
+                <button id="chatToggleBtn" class="icon-btn" title="Текстовый чат" aria-label="Чат"
+                    style="display: none;">
+                    💬
+                    <span id="chatUnreadBadge" class="unread-badge" style="display: none;">0</span>
+                </button>
                 <button id="settingsBtn" class="icon-btn" title="Настройки" aria-label="Настройки">⚙️</button>
             </div>
         </header>
@@ -53,17 +58,38 @@
 
             <!-- 3. Панель действий: Инвайты и Хост-контроль -->
             <div id="hostControlsBar" class="host-controls-bar glass" style="display: none;">
-                <button id="shareInviteBtn" class="action-chip" title="Скопировать ссылку для приглашения">🔗
-                    Пригласить</button>
+                <button id="shareInviteBtn" class="action-chip" title="Пригласить и показать QR-код">🔗 Пригласить /
+                    QR</button>
                 <button id="lockRoomBtn" class="action-chip" title="Закрыть вход в комнату" style="display: none;">🔓
                     Открыта</button>
                 <button id="muteAllBtn" class="action-chip danger" title="Заглушить всех собеседников"
                     style="display: none;">🔇 Заглушить всех</button>
             </div>
 
-            <!-- 4. Сетка участников голосового чата -->
-            <div id="participantsGrid" class="participants-grid" style="display: none;">
-                <!-- Карточки участников с холстами визуализатора генерируются в main.js -->
+            <!-- 4. Рабочая область звонка: Сетка участников + Боковой чат -->
+            <div id="callWorkspace" class="call-workspace" style="display: none;">
+                <div id="participantsGrid" class="participants-grid">
+                    <!-- Карточки участников с визуализаторами генерируются в main.js -->
+                </div>
+
+                <!-- Выдвижной микро-чат комнаты -->
+                <aside id="chatPanel" class="chat-panel glass" style="display: none;">
+                    <div class="chat-header">
+                        <h3>Чат комнаты</h3>
+                        <button id="closeChatBtn" class="close-btn" title="Скрыть чат">✕</button>
+                    </div>
+                    <div id="chatMessages" class="chat-messages">
+                        <!-- Сообщения чата -->
+                    </div>
+                    <form id="chatForm" class="chat-form" onsubmit="return false;">
+                        <input type="file" id="chatFileInput" style="display: none;">
+                        <button type="button" id="chatAttachBtn" class="chat-icon-btn"
+                            title="Прикрепить файл или фото">📎</button>
+                        <input type="text" id="chatInput" placeholder="Сообщение или вставка (Ctrl+V)..."
+                            maxlength="2000" autocomplete="off">
+                        <button type="submit" id="chatSendBtn" class="chat-send-btn" title="Отправить">➤</button>
+                    </form>
+                </aside>
             </div>
         </main>
 
@@ -77,7 +103,7 @@
         </footer>
     </div>
 
-    <!-- Модальное окно: Настройки -->
+    <!-- Модальное окно: Настройки звука, фильтров и профиля -->
     <div id="settingsModal" class="modal" style="display: none;">
         <div class="modal-content glass">
             <h3>Настройки звука и профиля</h3>
@@ -86,6 +112,18 @@
                 <h4>Профиль</h4>
                 <label for="settingsUserName">Отображаемое имя:</label>
                 <input type="text" id="settingsUserName" placeholder="Ваше имя" maxlength="30" autocomplete="off">
+            </div>
+
+            <div class="settings-section">
+                <h4>Голосовой DSP-фильтр (Эффект)</h4>
+                <label for="voiceFilterSelect">Обработка голоса на сервере:</label>
+                <select id="voiceFilterSelect" class="custom-select">
+                    <option value="none">🎙️ Обычный (Без эффектов)</option>
+                    <option value="radio">📻 Рация (Walkie-Talkie)</option>
+                    <option value="robot">🤖 Робот (Ring Modulator)</option>
+                    <option value="megaphone">📢 Мегафон (Overdrive)</option>
+                    <option value="demon">😈 Демон (Sub-Bass)</option>
+                </select>
             </div>
 
             <div class="settings-section">
@@ -112,7 +150,7 @@
                     <input type="checkbox" id="echoCancellation" checked>
                     Аппаратное эхоподавление браузера
                 </label>
-                <small class="hint-text">*Шумоподавление, VAD и AGC обрабатываются на Go-сервере.</small>
+                <small class="hint-text">*DSP-фильтрация и VAD выполняются в реальном времени на Go-сервере.</small>
             </div>
 
             <button id="closeSettingsBtn" class="primary-btn">Сохранить</button>
@@ -155,6 +193,25 @@
             </div>
             <button id="confirmPasswordBtn" class="primary-btn">Войти</button>
             <button id="cancelPasswordBtn" class="secondary-btn">Отмена</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно: Приглашение и QR-код -->
+    <div id="inviteModal" class="modal" style="display: none;">
+        <div class="modal-content glass invite-modal-content">
+            <h3>Пригласить в комнату</h3>
+            <p class="invite-subtitle">Отсканируйте QR-код смартфоном или отправьте прямую ссылку</p>
+
+            <div class="qr-wrapper">
+                <canvas id="inviteQrCanvas" width="200" height="200"></canvas>
+            </div>
+
+            <div class="invite-link-box">
+                <input type="text" id="inviteUrlInput" readonly>
+                <button id="copyInviteUrlBtn" class="action-chip">Копировать</button>
+            </div>
+
+            <button id="closeInviteModalBtn" class="secondary-btn">Закрыть</button>
         </div>
     </div>
 

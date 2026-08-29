@@ -61,7 +61,7 @@ body::before {
 }
 
 /* =============================================================================
-   Header
+   Header & Unread Badge
 ============================================================================= */
 .header {
     display: flex;
@@ -82,6 +82,12 @@ body::before {
     align-items: center;
     gap: 1rem;
     flex-wrap: wrap;
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
 }
 
 .logo {
@@ -118,6 +124,7 @@ body::before {
 }
 
 .icon-btn {
+    position: relative;
     background: var(--bg-glass);
     border: 1px solid var(--border-glass);
     color: var(--text-primary);
@@ -137,6 +144,35 @@ body::before {
     background: rgba(255, 255, 255, 0.1);
     border-color: var(--accent);
     box-shadow: 0 0 15px var(--accent-glow);
+}
+
+.unread-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: var(--danger);
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 700;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    box-shadow: 0 2px 6px var(--danger-glow);
+    animation: popIn 0.2s ease;
+}
+
+@keyframes popIn {
+    0% {
+        transform: scale(0);
+    }
+
+    100% {
+        transform: scale(1);
+    }
 }
 
 /* =============================================================================
@@ -171,9 +207,21 @@ body::before {
     gap: 0.75rem;
     padding: 0.6rem 1.2rem;
     flex-wrap: wrap;
-    max-width: 800px;
+    max-width: 900px;
     width: 100%;
     animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .action-chip {
@@ -352,14 +400,23 @@ body::before {
 }
 
 /* =============================================================================
-   Сетка участников (Participants Grid) & Визуализатор
+   Call Workspace: Сетка участников + Боковой чат
 ============================================================================= */
+.call-workspace {
+    display: flex;
+    gap: 1.5rem;
+    width: 100%;
+    max-width: 1200px;
+    align-items: flex-start;
+    justify-content: center;
+}
+
 .participants-grid {
+    flex: 1;
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
     gap: 1.25rem;
-    width: 100%;
-    max-width: 1100px;
+    min-width: 0;
 }
 
 .participant-card {
@@ -444,7 +501,7 @@ body::before {
     border-color: rgba(255, 82, 82, 0.3);
 }
 
-/* Обертка аватара и холст визуализатора */
+/* Обертка аватара и визуализатор */
 .avatar-wrapper {
     position: relative;
     width: 90px;
@@ -511,31 +568,264 @@ body::before {
     letter-spacing: 0.3px;
 }
 
-/* Ползунки громкости участников */
-.volume-control {
+/* =============================================================================
+   Боковой микро-чат (Chat Panel)
+============================================================================= */
+.chat-panel {
+    width: 340px;
+    height: 520px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: slideInRight 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.2rem;
+    border-bottom: 1px solid var(--border-glass);
+}
+
+.chat-header h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 0.2rem;
+    transition: color var(--transition);
+}
+
+.close-btn:hover {
+    color: var(--text-primary);
+}
+
+.chat-messages {
+    flex: 1;
+    padding: 1rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.chat-msg-row {
+    display: flex;
+    flex-direction: column;
+    max-width: 88%;
+}
+
+.chat-msg-row.self {
+    align-self: flex-end;
+}
+
+.chat-msg-row.other {
+    align-self: flex-start;
+}
+
+.chat-msg-author {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.2rem;
+    padding: 0 0.4rem;
+}
+
+.chat-bubble {
+    padding: 0.65rem 0.9rem;
+    border-radius: 14px;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.chat-msg-row.self .chat-bubble {
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    color: white;
+    border-bottom-right-radius: 4px;
+}
+
+.chat-msg-row.other .chat-bubble {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-glass);
+    color: var(--text-primary);
+    border-bottom-left-radius: 4px;
+}
+
+.chat-msg-time {
+    font-size: 0.65rem;
+    opacity: 0.7;
+    margin-top: 0.25rem;
+    text-align: right;
+}
+
+/* Превью изображений и файлов в чате */
+.chat-img-preview {
+    max-width: 100%;
+    max-height: 180px;
+    border-radius: 8px;
+    margin-top: 0.3rem;
+    cursor: pointer;
+    display: block;
+    object-fit: cover;
+}
+
+.chat-file-attachment {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 8px;
+    color: inherit;
+    text-decoration: none;
+    font-weight: 500;
+    margin-top: 0.3rem;
+    font-size: 0.85rem;
+    transition: background var(--transition);
+}
+
+.chat-file-attachment:hover {
+    background: rgba(0, 0, 0, 0.4);
+}
+
+.chat-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid var(--border-glass);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.chat-icon-btn {
+    background: transparent;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: 0.3rem;
+    transition: color var(--transition);
+}
+
+.chat-icon-btn:hover {
+    color: var(--accent);
+}
+
+.chat-form input[type="text"] {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-glass);
+    border-radius: 20px;
+    padding: 0.5rem 0.9rem;
+    color: var(--text-primary);
+    font-size: 0.88rem;
+    outline: none;
+}
+
+.chat-form input[type="text"]:focus {
+    border-color: var(--accent);
+}
+
+.chat-send-btn {
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 34px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all var(--transition);
+}
+
+.chat-send-btn:hover {
+    box-shadow: 0 0 10px var(--accent-glow);
+    transform: scale(1.05);
+}
+
+/* =============================================================================
+   Модальное окно инвайтов и QR-кода
+============================================================================= */
+.invite-modal-content {
+    text-align: center;
+    max-width: 400px;
+}
+
+.invite-subtitle {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: -0.8rem 0 1.5rem;
+}
+
+.qr-wrapper {
+    background: white;
+    padding: 1rem;
+    border-radius: var(--radius-md);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.invite-link-box {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.2rem;
+}
+
+.invite-link-box input {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 0.8rem;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    outline: none;
+}
+
+/* =============================================================================
+   Кастомный селектор фильтров голоса
+============================================================================= */
+.custom-select {
     width: 100%;
-    -webkit-appearance: none;
-    height: 5px;
-    background: rgba(255, 255, 255, 0.12);
-    border-radius: 3px;
+    padding: 0.8rem 1rem;
+    background: #181829;
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.95rem;
     outline: none;
     cursor: pointer;
     transition: all var(--transition);
 }
 
-.volume-control::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 15px;
-    height: 15px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    box-shadow: 0 2px 8px rgba(124, 108, 255, 0.4);
-    transition: transform var(--transition);
-}
-
-.volume-control::-webkit-slider-thumb:hover {
-    transform: scale(1.25);
+.custom-select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 12px rgba(124, 108, 255, 0.3);
 }
 
 /* =============================================================================
@@ -598,7 +888,7 @@ body::before {
 }
 
 /* =============================================================================
-   Modals & Settings Inputs
+   Modals & Inputs
 ============================================================================= */
 .modal {
     position: fixed;
@@ -721,23 +1011,34 @@ body::before {
    Scrollbar & Media Queries
 ============================================================================= */
 .rooms-list::-webkit-scrollbar,
+.chat-messages::-webkit-scrollbar,
 .modal-content::-webkit-scrollbar {
     width: 5px;
 }
 
 .rooms-list::-webkit-scrollbar-thumb,
+.chat-messages::-webkit-scrollbar-thumb,
 .modal-content::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.15);
     border-radius: 4px;
 }
 
-@media (max-width: 600px) {
+@media (max-width: 768px) {
     .header {
         padding: 0.75rem 1rem;
     }
 
     .main-content {
         padding: 1rem 0.75rem;
+    }
+
+    .call-workspace {
+        flex-direction: column;
+    }
+
+    .chat-panel {
+        width: 100%;
+        height: 380px;
     }
 
     .participants-grid {
@@ -753,12 +1054,6 @@ body::before {
     .action-chip {
         padding: 0.35rem 0.75rem;
         font-size: 0.75rem;
-    }
-
-    .room-selection-panel,
-    .connection-panel,
-    .modal-content {
-        padding: 1.5rem 1.2rem;
     }
 
     .control-btn {
