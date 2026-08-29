@@ -20,6 +20,7 @@
         <header class="header">
             <div class="header-left">
                 <h1 class="logo">🎙️ VoiceChat</h1>
+                <span id="currentRoomLabel" class="room-name">Комната: main</span>
             </div>
             <div class="header-right">
                 <button id="settingsBtn" class="icon-btn" title="Настройки">⚙️</button>
@@ -38,6 +39,7 @@
                     <input type="text" id="newRoomName" placeholder="Название новой комнаты" maxlength="30">
                     <button id="createRoomBtn" class="primary-btn">Создать комнату</button>
                 </div>
+                <button id="refreshRoomsBtn" class="secondary-btn">🔄 Обновить список</button>
             </div>
 
             <!-- Connection panel -->
