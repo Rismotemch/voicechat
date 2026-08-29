@@ -3,20 +3,22 @@
  * File: web/js/audio.js
  * 
  * Provides unified management of Web Audio API, AudioWorklets,
- * microphone lifecycle, per-speaker routing, and jitter-buffered playback.
+ * microphone lifecycle, per-speaker routing, and INDEPENDENT per-speaker jitter scheduling.
  */
 
 class AudioManager {
     /**
      * @param {Object} options
-     * @param {number} [options.sampleRate=16000] - Рабочая частота дискретизации (16 кГц)
-     * @param {number} [options.frameDurationMs=20] - Длительность пакета
-     * @param {number} [options.jitterBufferMs=60] - Буфер компенсации сетевого джиттера TCP
+     * @param {number} [options.sampleRate=16000] - Частота дискретизации (16 кГц)
+     * @param {number} [options.frameDurationMs=20] - Квант аудио (20 мс)
+     * @param {number} [options.jitterBufferMs=50] - Целевой джиттер-буфер
+     * @param {number} [options.maxDriftSec=0.15] - Максимальное отставание до сброса (150 мс)
      */
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000;
         this.frameDurationMs = options.frameDurationMs || 20;
-        this.jitterBufferMs = options.jitterBufferMs || 60;
+        this.jitterBufferMs = options.jitterBufferMs || 50;
+        this.maxDriftSec = options.maxDriftSec || 0.15;
 
         /** @type {AudioContext|null} */
         this.audioContext = null;
@@ -34,10 +36,12 @@ class AudioManager {
         /** @type {Map<string, number>} */
         this.participantVolumes = new Map();
 
+        /** @type {Map<string, number>} Независимые таймлайны воспроизведения для каждого участника */
+        this.speakerPlayTimes = new Map();
+
         this.masterVolume = 1.0;
         this.isRecording = false;
         this.isMuted = false;
-        this.nextPlayTime = 0;
         this.workletLoaded = false;
 
         /** @type {((buffer: ArrayBuffer) => void)|null} */
@@ -88,7 +92,6 @@ class AudioManager {
                     channelCount: 1,
                     sampleRate: this.sampleRate,
                     echoCancellation: echoCancellation,
-                    // Тяжелые фильтры отключены в браузере, DSP выполняется на Go-сервере
                     noiseSuppression: false,
                     autoGainControl: false
                 },
@@ -106,7 +109,6 @@ class AudioManager {
                     this.onAudioFrame(pcmBuffer);
                 }
 
-                // Локальный расчет VAD для мгновенного отображения собственного индикатора речи
                 this._calculateVAD(pcmBuffer, 'self');
             };
 
@@ -121,7 +123,7 @@ class AudioManager {
     }
 
     /**
-     * Полная остановка микрофона и освобождение треков
+     * Остановка микрофона
      */
     stopMicrophone() {
         if (this.workletNode) {
@@ -154,7 +156,7 @@ class AudioManager {
     }
 
     /**
-     * Установка состояния микрофона (Mute)
+     * Mute микрофона
      * @param {boolean} isMuted
      */
     setMute(isMuted) {
@@ -168,7 +170,7 @@ class AudioManager {
     }
 
     /**
-     * Переключение режима микрофона
+     * Переключение Mute
      * @returns {boolean}
      */
     toggleMute() {
@@ -177,21 +179,22 @@ class AudioManager {
     }
 
     /**
-     * Воспроизведение входящего бинарного пакета от сервера с защитой выравнивания (2-byte alignment)
-     * @param {ArrayBuffer} arrayBuffer - Сырой бинарный фрейм WebSocket
+     * Воспроизведение входящего бинарного пакета от сервера.
+     * Каждый участник воспроизводится ПАРАЛЛЕЛЬНО и независимо.
+     * @param {ArrayBuffer} arrayBuffer
      */
     playAudioPacket(arrayBuffer) {
         if (!this.audioContext || arrayBuffer.byteLength < 4) return;
 
         const view = new DataView(arrayBuffer);
-        const idLen = view.getUint16(0, false); // Big-Endian uint16 длина ID
+        const idLen = view.getUint16(0, false); // Big-Endian uint16
         let pcmOffset = 0;
-        let speakerId = null;
+        let speakerId = 'default_stream';
 
         if (idLen > 0 && arrayBuffer.byteLength >= 2 + idLen + 2) {
             const idBytes = new Uint8Array(arrayBuffer, 2, idLen);
             speakerId = new TextDecoder().decode(idBytes);
-            // Учитываем выравнивание заголовка на 2 байта (2-byte alignment padding от сервера)
+            // 2-byte alignment padding от Go-сервера
             pcmOffset = 2 + idLen + (idLen % 2 !== 0 ? 1 : 0);
         } else {
             pcmOffset = 0;
@@ -201,8 +204,6 @@ class AudioManager {
         if (rawByteLength % 2 !== 0 || rawByteLength < 2) return;
 
         const sampleCount = rawByteLength / 2;
-
-        // Безопасное создание Int16Array: pcmOffset всегда кратен 2
         const int16Array = new Int16Array(arrayBuffer, pcmOffset, sampleCount);
         const float32Buffer = new Float32Array(sampleCount);
         let energySum = 0;
@@ -213,8 +214,8 @@ class AudioManager {
             energySum += s * s;
         }
 
-        // Индикация активности говорящего
-        if (speakerId && typeof this.onSpeakingStateChange === 'function') {
+        // Индикация речи собеседника
+        if (speakerId !== 'default_stream' && typeof this.onSpeakingStateChange === 'function') {
             const rms = Math.sqrt(energySum / sampleCount);
             this.onSpeakingStateChange(speakerId, rms > 0.012);
         }
@@ -225,30 +226,38 @@ class AudioManager {
         const sourceNode = this.audioContext.createBufferSource();
         sourceNode.buffer = audioBuffer;
 
-        // Маршрутизация через индивидуальный GainNode участника
+        // Персональный GainNode для регулировки громкости конкретного человека
         const targetGain = this._getParticipantGainNode(speakerId);
         sourceNode.connect(targetGain);
 
-        // Планировщик воспроизведения (Jitter Buffer Scheduler)
+        // =====================================================================
+        // Изолированный джиттер-буфер для КОНКРЕТНОГО участника
+        // =====================================================================
         const currentTime = this.audioContext.currentTime;
         const jitterOffset = this.jitterBufferMs / 1000.0;
+        let nextPlayTime = this.speakerPlayTimes.get(speakerId) || 0;
 
-        if (this.nextPlayTime < currentTime) {
-            this.nextPlayTime = currentTime + jitterOffset;
+        // Если поток прерывался или еще не начался
+        if (nextPlayTime < currentTime) {
+            nextPlayTime = currentTime + jitterOffset;
+        }
+        // Если накопилось слишком большое отставание (более 150 мс), сбрасываем буфер
+        else if (nextPlayTime > currentTime + this.maxDriftSec) {
+            nextPlayTime = currentTime + jitterOffset;
         }
 
-        sourceNode.start(this.nextPlayTime);
-        this.nextPlayTime += audioBuffer.duration;
+        sourceNode.start(nextPlayTime);
+        this.speakerPlayTimes.set(speakerId, nextPlayTime + audioBuffer.duration);
     }
 
     /**
-     * Получение или создание изолированного GainNode для собеседника
+     * Получение или создание GainNode участника
      * @private
-     * @param {string|null} speakerId
+     * @param {string} speakerId
      * @returns {GainNode}
      */
     _getParticipantGainNode(speakerId) {
-        if (!speakerId) {
+        if (!speakerId || speakerId === 'default_stream') {
             return this.masterGain;
         }
 
@@ -264,7 +273,7 @@ class AudioManager {
     }
 
     /**
-     * Установка индивидуальной громкости участника
+     * Индивидуальная громкость участника
      * @param {string} userId
      * @param {number} volume [0.0 ... 2.0]
      */
@@ -279,7 +288,7 @@ class AudioManager {
     }
 
     /**
-     * Установка мастер-громкости приложения
+     * Мастер-громкость
      * @param {number} volume [0.0 ... 2.0]
      */
     setMasterVolume(volume) {
@@ -290,7 +299,7 @@ class AudioManager {
     }
 
     /**
-     * Удаление GainNode вышедшего участника
+     * Очистка ресурсов участника при его выходе
      * @param {string} userId
      */
     removeParticipant(userId) {
@@ -302,10 +311,11 @@ class AudioManager {
             this.participantGains.delete(userId);
         }
         this.participantVolumes.delete(userId);
+        this.speakerPlayTimes.delete(userId);
     }
 
     /**
-     * Полное освобождение аудио-ресурсов
+     * Полное уничтожение контекста
      */
     async destroy() {
         this.stopMicrophone();
@@ -317,6 +327,7 @@ class AudioManager {
         });
         this.participantGains.clear();
         this.participantVolumes.clear();
+        this.speakerPlayTimes.clear();
 
         if (this.masterGain) {
             try {
@@ -331,11 +342,10 @@ class AudioManager {
         }
 
         this.workletLoaded = false;
-        this.nextPlayTime = 0;
     }
 
     /**
-     * Локальный расчет среднеквадратичной энергии для VAD
+     * Локальный расчет VAD
      * @private
      */
     _calculateVAD(pcmBuffer, userId) {
@@ -351,5 +361,5 @@ class AudioManager {
     }
 }
 
-// Глобальный синглтон контроллера звука
+// Глобальный экземпляр
 window.audioManager = new AudioManager();

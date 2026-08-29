@@ -1,6 +1,6 @@
 /**
  * VoiceChat Client Engine - web/js/main.js
- * High-performance WebSocket & UI Controller integrated with AudioManager.
+ * High-performance WebSocket & UI Controller integrated with AudioManager and PWAManager.
  */
 
 (() => {
@@ -22,9 +22,10 @@
         isJoined: false,
         isMuted: false,
 
-        // Настройки
+        // Настройки аудио и чувствительности
         echoCancellationEnabled: true,
         masterVolume: 1.0,
+        micSensitivity: 100,
 
         // Комнаты и навигация
         selectedRoomId: 'main',
@@ -67,6 +68,8 @@
         confirmPasswordBtn: document.getElementById('confirmPasswordBtn'),
         cancelPasswordBtn: document.getElementById('cancelPasswordBtn'),
         settingsUserName: document.getElementById('settingsUserName'),
+        micSensitivity: document.getElementById('micSensitivity'),
+        micSensitivityValue: document.getElementById('micSensitivityValue'),
         masterVolume: document.getElementById('masterVolume'),
         masterVolumeValue: document.getElementById('masterVolumeValue'),
         echoCancellation: document.getElementById('echoCancellation'),
@@ -132,10 +135,24 @@
         if (dom.confirmPasswordBtn) dom.confirmPasswordBtn.addEventListener('click', () => handlePasswordSubmit());
         if (dom.cancelPasswordBtn) dom.cancelPasswordBtn.addEventListener('click', () => closePasswordModal());
 
+        // Ползунок чувствительности микрофона
+        if (dom.micSensitivity) {
+            dom.micSensitivity.addEventListener('input', (e) => {
+                const val = parseInt(e.target.value, 10) || 0;
+                state.micSensitivity = val;
+                if (dom.micSensitivityValue) {
+                    dom.micSensitivityValue.textContent = `${val}%`;
+                }
+            });
+        }
+
+        // Ползунок общей громкости
         if (dom.masterVolume) {
             dom.masterVolume.addEventListener('input', (e) => {
-                const val = parseInt(e.target.value, 10);
-                if (dom.masterVolumeValue) dom.masterVolumeValue.textContent = `${val}%`;
+                const val = parseInt(e.target.value, 10) || 0;
+                if (dom.masterVolumeValue) {
+                    dom.masterVolumeValue.textContent = `${val}%`;
+                }
                 state.masterVolume = val / 100;
                 window.audioManager.setMasterVolume(state.masterVolume);
             });
@@ -195,7 +212,7 @@
                     if (typeof event.data === 'string') {
                         handleSignalingMessage(event.data);
                     } else if (event.data instanceof ArrayBuffer) {
-                        // Воспроизведение обработанного сервером аудио с выравниванием и джиттер-буфером
+                        // Воспроизведение обработанного сервером аудио с независимым джиттер-буфером
                         window.audioManager.playAudioPacket(event.data);
                     }
                 };
@@ -293,6 +310,12 @@
         dom.participantsGrid.style.display = 'grid';
         dom.footerControls.style.display = 'flex';
         updateRoomLabel();
+
+        // Активация WakeLock и медиа-сессии
+        if (window.pwaManager) {
+            window.pwaManager.acquireWakeLock();
+            window.pwaManager.setupMediaSession(state.selectedRoomName);
+        }
     }
 
     function onUserJoined(payload) {
@@ -393,7 +416,7 @@
     async function joinRoom() {
         if (!state.user) initUserProfile();
 
-        // 1. Инициализация и захват аудио прямо по клику (разблокировка Autoplay Policy)
+        // 1. Запуск аудио по прямому жесту пользователя (разблокировка Autoplay Policy)
         try {
             await window.audioManager.init();
             await window.audioManager.startMicrophone(state.echoCancellationEnabled);
@@ -403,7 +426,7 @@
             return;
         }
 
-        // 2. Подключение к WebSocket и вход в комнату
+        // 2. Подключение к WebSocket
         try {
             await connectWebSocket();
             sendJoinPayload();
@@ -428,6 +451,10 @@
     function leaveRoom() {
         if (state.isJoined) {
             sendSignaling('leave', { roomId: state.selectedRoomId });
+        }
+
+        if (window.pwaManager) {
+            window.pwaManager.releaseWakeLock();
         }
 
         window.audioManager.stopMicrophone();
@@ -499,6 +526,19 @@
         }
         if (dom.echoCancellation) {
             dom.echoCancellation.checked = state.echoCancellationEnabled;
+        }
+        if (dom.micSensitivity) {
+            dom.micSensitivity.value = state.micSensitivity;
+            if (dom.micSensitivityValue) {
+                dom.micSensitivityValue.textContent = `${state.micSensitivity}%`;
+            }
+        }
+        if (dom.masterVolume) {
+            const volPercent = Math.round(state.masterVolume * 100);
+            dom.masterVolume.value = volPercent;
+            if (dom.masterVolumeValue) {
+                dom.masterVolumeValue.textContent = `${volPercent}%`;
+            }
         }
         if (dom.settingsModal) {
             dom.settingsModal.style.display = 'flex';
@@ -623,6 +663,10 @@
         card.appendChild(name);
 
         if (!isSelf) {
+            const volContainer = document.createElement('div');
+            volContainer.className = 'range-wrapper';
+            volContainer.style.marginTop = '0.75rem';
+
             const volSlider = document.createElement('input');
             volSlider.type = 'range';
             volSlider.min = '0';
@@ -631,11 +675,20 @@
             volSlider.className = 'volume-control';
             volSlider.title = 'Громкость собеседника';
 
+            const volValue = document.createElement('span');
+            volValue.textContent = '100%';
+            volValue.style.fontSize = '0.8rem';
+            volValue.style.minWidth = '38px';
+
             volSlider.addEventListener('input', (e) => {
-                const gain = parseInt(e.target.value, 10) / 100;
-                window.audioManager.setParticipantVolume(user.id, gain);
+                const percent = parseInt(e.target.value, 10) || 0;
+                volValue.textContent = `${percent}%`;
+                window.audioManager.setParticipantVolume(user.id, percent / 100);
             });
-            card.appendChild(volSlider);
+
+            volContainer.appendChild(volSlider);
+            volContainer.appendChild(volValue);
+            card.appendChild(volContainer);
         }
 
         if (dom.participantsGrid) {
