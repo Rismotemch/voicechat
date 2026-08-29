@@ -15,14 +15,11 @@ jobs:
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            cd /opt/voicechat
+            git pull
             docker stop voicechat 2>/dev/null || true
             docker rm -f voicechat 2>/dev/null || true
             docker compose down 2>/dev/null || true
-
-            # Пересобираем
             docker compose build --no-cache
             docker compose up -d
-
-            # Проверяем
             docker compose ps
-            docker logs voicechat
