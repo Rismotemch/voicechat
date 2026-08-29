@@ -268,11 +268,20 @@ if (window.voiceChatApp) {
 
     function processPCMData(userId, pcmData) {
         if (!state.audioContext) return;
-        const int16Array = new Int16Array(pcmData.buffer);
+
+        // Убедимся, что длина чётная (Int16Array требует 2 байта на элемент)
+        let byteArray = new Uint8Array(pcmData);
+        if (byteArray.length % 2 !== 0) {
+            // Обрезаем до чётного количества байт
+            byteArray = byteArray.slice(0, byteArray.length - 1);
+        }
+
+        const int16Array = new Int16Array(byteArray.buffer);
         const float32Array = new Float32Array(int16Array.length);
         for (let i = 0; i < int16Array.length; i++) {
             float32Array[i] = int16Array[i] / 32768.0;
         }
+
         const rms = Math.sqrt(float32Array.reduce((sum, val) => sum + val * val, 0) / float32Array.length);
         if (rms > state.speakingThreshold) {
             state.speakingUsers.add(userId);
@@ -281,6 +290,7 @@ if (window.voiceChatApp) {
             state.speakingUsers.delete(userId);
             updateSpeakingIndicator(userId, false);
         }
+
         const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
         const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, state.sampleRate);
         audioBuffer.getChannelData(0).set(float32Array);
