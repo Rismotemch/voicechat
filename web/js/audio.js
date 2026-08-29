@@ -1,212 +1,230 @@
 /**
- * VoiceChat Audio Engine Controller
- * File: web/js/audio.js
- * 
- * Provides unified management of Web Audio API, AudioWorklets,
- * microphone lifecycle, per-speaker routing, independent jitter buffers,
- * and AnalyserNode spectrum/waveform data for voice visualization.
+ * VoiceChat Audio Engine - web/js/audio.js
+ * Cross-browser Web Audio API pipeline with Safari/iOS unlock,
+ * Jitter-buffer scheduling, PCM-16 decoding & Micro-Fading.
  */
 
 class AudioManager {
-    /**
-     * @param {Object} options
-     * @param {number} [options.sampleRate=16000] - Частота дискретизации (16 кГц)
-     * @param {number} [options.frameDurationMs=20] - Квант аудио (20 мс)
-     * @param {number} [options.jitterBufferMs=50] - Целевой джиттер-буфер
-     * @param {number} [options.maxDriftSec=0.15] - Максимальное отставание до сброса (150 мс)
-     */
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000;
         this.frameDurationMs = options.frameDurationMs || 20;
-        this.jitterBufferMs = options.jitterBufferMs || 65;
+        this.samplesPerFrame = (this.sampleRate * this.frameDurationMs) / 1000; // 320 сэмплов
+        this.jitterBufferMs = options.jitterBufferMs || 60; // 60 мс джиттер-буфер
         this.maxDriftSec = options.maxDriftSec || 0.15;
 
-        /** @type {AudioContext|null} */
-        this.audioContext = null;
-        /** @type {MediaStream|null} */
-        this.microphoneStream = null;
-        /** @type {MediaStreamAudioSourceNode|null} */
-        this.sourceNode = null;
-        /** @type {AudioWorkletNode|null} */
-        this.workletNode = null;
-        /** @type {GainNode|null} */
-        this.masterGain = null;
+        this.audioCtx = null;
+        this.micStream = null;
+        this.micSourceNode = null;
+        this.micGainNode = null;
+        this.micProcessorNode = null;
 
-        /** @type {AnalyserNode|null} Анализатор для локального микрофона */
-        this.localAnalyser = null;
+        this.masterGainNode = null;
+        this.analyserNode = null;
 
-        /** @type {Map<string, GainNode>} */
-        this.participantGains = new Map();
-        /** @type {Map<string, AnalyserNode>} Анализаторы для каждого удаленного собеседника */
-        this.participantAnalysers = new Map();
-        /** @type {Map<string, number>} */
-        this.participantVolumes = new Map();
+        this.participants = new Map(); // senderId -> { gainNode, pannerNode, nextPlayTime, analyser, freqData }
+        this.speakingTimeouts = new Map();
 
-        /** @type {Map<string, number>} Независимые таймлайны воспроизведения */
-        this.speakerPlayTimes = new Map();
-
-        this.masterVolume = 1.0;
-        this.isRecording = false;
         this.isMuted = false;
-        this.workletLoaded = false;
+        this.isInitialized = false;
+        this.textDecoder = new TextDecoder('utf-8');
 
-        /** @type {((buffer: ArrayBuffer) => void)|null} */
+        // Callbacks
         this.onAudioFrame = null;
-        /** @type {((userId: string, isSpeaking: boolean) => void)|null} */
         this.onSpeakingStateChange = null;
     }
 
-    /**
-     * Инициализация AudioContext и загрузка Worklet
-     * @returns {Promise<void>}
-     */
     async init() {
-        if (!this.audioContext) {
-            const AudioCtx = window.AudioContext || window.webkitAudioContext;
-            this.audioContext = new AudioCtx({
-                sampleRate: this.sampleRate,
-                latencyHint: 'interactive'
-            });
-
-            this.masterGain = this.audioContext.createGain();
-            this.masterGain.gain.setValueAtTime(this.masterVolume, this.audioContext.currentTime);
-            this.masterGain.connect(this.audioContext.destination);
+        if (this.isInitialized && this.audioCtx) {
+            if (this.audioCtx.state === 'suspended') {
+                await this.audioCtx.resume();
+            }
+            return;
         }
 
-        if (this.audioContext.state === 'suspended') {
-            await this.audioContext.resume();
-        }
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
 
-        if (!this.workletLoaded) {
-            await this.audioContext.audioWorklet.addModule('/js/audio-processor.js');
-            this.workletLoaded = true;
-        }
+        // Мастер-громкость
+        this.masterGainNode = this.audioCtx.createGain();
+        this.masterGainNode.gain.value = 1.0;
+        this.masterGainNode.connect(this.audioCtx.destination);
+
+        // Анализатор локального микрофона для визуализатора
+        this.analyserNode = this.audioCtx.createAnalyser();
+        this.analyserNode.fftSize = 64;
+        this.analyserNode.smoothingTimeConstant = 0.5;
+
+        // Разблокировка Web Audio в Safari / iOS
+        await this.unlockAudioContext();
+
+        this.isInitialized = true;
     }
 
-    /**
-     * Захват аудио с микрофона и подключение AnalyserNode
-     * @param {boolean} echoCancellation
-     * @returns {Promise<void>}
-     */
+    async unlockAudioContext() {
+        if (!this.audioCtx) return;
+
+        if (this.audioCtx.state === 'suspended') {
+            await this.audioCtx.resume();
+        }
+
+        // Проигрываем бесшумный буфер для снятия ограничений WebKit
+        try {
+            const silentBuffer = this.audioCtx.createBuffer(1, 1, 22050);
+            const source = this.audioCtx.createBufferSource();
+            source.buffer = silentBuffer;
+            source.connect(this.audioCtx.destination);
+            source.start(0);
+        } catch (e) { }
+    }
+
     async startMicrophone(echoCancellation = true) {
         await this.init();
-        this.stopMicrophone();
+        await this.unlockAudioContext();
 
-        try {
-            this.microphoneStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    channelCount: 1,
-                    sampleRate: this.sampleRate,
-                    echoCancellation: echoCancellation,
-                    noiseSuppression: false,
-                    autoGainControl: false
-                },
-                video: false
-            });
+        if (this.micStream) {
+            this.stopMicrophone();
+        }
 
-            this.sourceNode = this.audioContext.createMediaStreamSource(this.microphoneStream);
-            this.workletNode = new AudioWorkletNode(this.audioContext, 'voice-capture-processor');
+        const constraints = {
+            audio: {
+                echoCancellation: echoCancellation,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1,
+                sampleRate: this.sampleRate
+            },
+            video: false
+        };
 
-            // Создаем анализатор для визуализации собственного голоса
-            this.localAnalyser = this.audioContext.createAnalyser();
-            this.localAnalyser.fftSize = 64;
-            this.localAnalyser.smoothingTimeConstant = 0.8;
+        this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
+        this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-            this.workletNode.port.onmessage = (event) => {
-                if (!this.isRecording || this.isMuted) return;
+        this.micGainNode = this.audioCtx.createGain();
+        this.micGainNode.gain.value = 1.0;
 
-                const pcmBuffer = event.data;
-                if (typeof this.onAudioFrame === 'function') {
-                    this.onAudioFrame(pcmBuffer);
+        // Захват PCM через ScriptProcessor (гарантирует синхронные 320 сэмплов)
+        this.micProcessorNode = this.audioCtx.createScriptProcessor(512, 1, 1);
+
+        let sampleAccumulator = [];
+
+        this.micProcessorNode.onaudioprocess = (e) => {
+            if (this.isMuted) return;
+
+            const inputData = e.inputBuffer.getChannelData(0);
+            for (let i = 0; i < inputData.length; i++) {
+                sampleAccumulator.push(inputData[i]);
+            }
+
+            while (sampleAccumulator.length >= this.samplesPerFrame) {
+                const chunk = sampleAccumulator.splice(0, this.samplesPerFrame);
+                const pcm16Buffer = new ArrayBuffer(this.samplesPerFrame * 2);
+                const view = new DataView(pcm16Buffer);
+
+                for (let j = 0; j < this.samplesPerFrame; j++) {
+                    let s = chunk[j];
+                    if (s > 1.0) s = 1.0;
+                    if (s < -1.0) s = -1.0;
+                    const int16 = s < 0 ? s * 32768 : s * 32767;
+                    view.setInt16(j * 2, int16, true);
                 }
 
-                this._calculateVAD(pcmBuffer, 'self');
-            };
+                if (this.onAudioFrame) {
+                    this.onAudioFrame(pcm16Buffer);
+                }
+            }
+        };
 
-            this.sourceNode.connect(this.localAnalyser);
-            this.sourceNode.connect(this.workletNode);
+        this.micSourceNode.connect(this.micGainNode);
+        this.micGainNode.connect(this.analyserNode);
+        this.micGainNode.connect(this.micProcessorNode);
 
-            this.isRecording = true;
-            this.setMute(this.isMuted);
-        } catch (err) {
-            console.error('[AudioManager] Failed to start microphone capture:', err);
-            this.stopMicrophone();
-            throw err;
-        }
+        // Dummy connection для старта онаудиопроцесс в WebKit
+        const dummyGain = this.audioCtx.createGain();
+        dummyGain.gain.value = 0;
+        this.micProcessorNode.connect(dummyGain);
+        dummyGain.connect(this.audioCtx.destination);
     }
 
-    /**
-     * Остановка захвата микрофона
-     */
     stopMicrophone() {
-        if (this.workletNode) {
-            try {
-                this.workletNode.port.onmessage = null;
-                this.workletNode.disconnect();
-            } catch (e) { }
-            this.workletNode = null;
+        if (this.micStream) {
+            this.micStream.getTracks().forEach(t => t.stop());
+            this.micStream = null;
         }
-
-        if (this.localAnalyser) {
-            try {
-                this.localAnalyser.disconnect();
-            } catch (e) { }
-            this.localAnalyser = null;
+        if (this.micProcessorNode) {
+            this.micProcessorNode.disconnect();
+            this.micProcessorNode = null;
         }
-
-        if (this.sourceNode) {
-            try {
-                this.sourceNode.disconnect();
-            } catch (e) { }
-            this.sourceNode = null;
+        if (this.micGainNode) {
+            this.micGainNode.disconnect();
+            this.micGainNode = null;
         }
-
-        if (this.microphoneStream) {
-            this.microphoneStream.getTracks().forEach((track) => {
-                track.stop();
-                track.enabled = false;
-            });
-            this.microphoneStream = null;
-        }
-
-        this.isRecording = false;
-        if (typeof this.onSpeakingStateChange === 'function') {
-            this.onSpeakingStateChange('self', false);
+        if (this.micSourceNode) {
+            this.micSourceNode.disconnect();
+            this.micSourceNode = null;
         }
     }
 
-    /**
-     * Mute микрофона
-     * @param {boolean} isMuted
-     */
-    setMute(isMuted) {
-        this.isMuted = Boolean(isMuted);
-        if (this.workletNode) {
-            this.workletNode.port.postMessage({ isMuted: this.isMuted });
-        }
-        if (this.isMuted && typeof this.onSpeakingStateChange === 'function') {
-            this.onSpeakingStateChange('self', false);
-        }
-    }
-
-    /**
-     * Переключение Mute
-     * @returns {boolean}
-     */
     toggleMute() {
-        this.setMute(!this.isMuted);
+        this.isMuted = !this.isMuted;
+        if (this.isMuted && this.onSpeakingStateChange) {
+            this.onSpeakingStateChange('self', false);
+        }
         return this.isMuted;
     }
 
+    setMasterVolume(val) {
+        if (this.masterGainNode && this.audioCtx) {
+            this.masterGainNode.gain.setValueAtTime(val, this.audioCtx.currentTime);
+        }
+    }
+
+    setParticipantVolume(senderId, val) {
+        const participant = this.participants.get(senderId);
+        if (participant && participant.gainNode && this.audioCtx) {
+            participant.gainNode.gain.setValueAtTime(val, this.audioCtx.currentTime);
+        }
+    }
+
+    createParticipantAudioChain(senderId) {
+        const gainNode = this.audioCtx.createGain();
+        gainNode.gain.value = 1.0;
+
+        const analyser = this.audioCtx.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.5;
+
+        gainNode.connect(analyser);
+        analyser.connect(this.masterGainNode);
+
+        const participant = {
+            gainNode,
+            analyser,
+            freqData: new Uint8Array(analyser.frequencyBinCount),
+            nextPlayTime: 0
+        };
+
+        this.participants.set(senderId, participant);
+        return participant;
+    }
+
+    removeParticipant(senderId) {
+        const participant = this.participants.get(senderId);
+        if (participant) {
+            try {
+                participant.gainNode.disconnect();
+                participant.analyser.disconnect();
+            } catch (e) { }
+            this.participants.delete(senderId);
+        }
+    }
+
     /**
-     * Воспроизведение входящего бинарного пакета от сервера.
-     * @param {ArrayBuffer} arrayBuffer
+     * Воспроизведение бинарного PCM-пакета с автопробуждением контекста
      */
-    // Метод проигрывания пакета с мягким 1-мс фейдом на границах:
     async playAudioPacket(arrayBuffer) {
         if (!this.audioCtx) return;
 
-        // Автоматически будим AudioContext, если он уснул
+        // Если Safari заблокировал контекст — будим его
         if (this.audioCtx.state === 'suspended') {
             try {
                 await this.audioCtx.resume();
@@ -214,8 +232,6 @@ class AudioManager {
                 return;
             }
         }
-
-        if (!this.audioCtx || this.audioCtx.state !== 'running') return;
 
         const dataView = new DataView(arrayBuffer);
         if (dataView.byteLength < 4) return;
@@ -233,21 +249,19 @@ class AudioManager {
         const sampleCount = Math.floor(pcmByteLength / 2);
         if (sampleCount === 0) return;
 
-        // Извлекаем PCM Int16 -> Float32
+        // PCM Int16 -> Float32
         const float32Data = new Float32Array(sampleCount);
         for (let i = 0; i < sampleCount; i++) {
             const int16 = dataView.getInt16(pcmOffset + i * 2, true);
             float32Data[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        // -------------------------------------------------------------
-        // Micro-Fade Envelope (1 мс = 16 сэмплов): устраняет щелчки на стыках
-        // -------------------------------------------------------------
+        // Микро-сглаживание (16 сэмплов = 1 мс) для удаления клиппинга
         const fadeSamples = Math.min(16, Math.floor(sampleCount / 4));
         for (let i = 0; i < fadeSamples; i++) {
             const ramp = i / fadeSamples;
-            float32Data[i] *= ramp;                             // Fade In
-            float32Data[sampleCount - 1 - i] *= ramp;           // Fade Out
+            float32Data[i] *= ramp;
+            float32Data[sampleCount - 1 - i] *= ramp;
         }
 
         const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
@@ -261,10 +275,8 @@ class AudioManager {
         const now = this.audioCtx.currentTime;
         const frameDuration = sampleCount / this.sampleRate;
 
-        // Адаптивное планирование без резких скачков
-        if (participant.nextPlayTime < now) {
-            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
-        } else if (participant.nextPlayTime - now > this.maxDriftSec) {
+        // Коррекция таймлайна при дрейфе
+        if (participant.nextPlayTime < now || (participant.nextPlayTime - now) > this.maxDriftSec) {
             participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
         }
 
@@ -278,163 +290,40 @@ class AudioManager {
         this.triggerSpeaking(senderId);
     }
 
+    triggerSpeaking(userId) {
+        if (this.onSpeakingStateChange) {
+            this.onSpeakingStateChange(userId, true);
 
-    /**
-     * Получение или создание GainNode и AnalyserNode для участника
-     * @private
-     * @param {string} speakerId
-     * @returns {GainNode}
-     */
-    _getParticipantGainNode(speakerId) {
-        if (!speakerId || speakerId === 'default_stream') {
-            return this.masterGain;
+            if (this.speakingTimeouts.has(userId)) {
+                clearTimeout(this.speakingTimeouts.get(userId));
+            }
+
+            const tid = setTimeout(() => {
+                this.onSpeakingStateChange(userId, false);
+                this.speakingTimeouts.delete(userId);
+            }, 300);
+
+            this.speakingTimeouts.set(userId, tid);
         }
-
-        let gainNode = this.participantGains.get(speakerId);
-        if (!gainNode) {
-            gainNode = this.audioContext.createGain();
-            const volume = this.participantVolumes.get(speakerId) ?? 1.0;
-            gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
-
-            // Создаем анализатор для спектральной визуализации собеседника
-            const analyser = this.audioContext.createAnalyser();
-            analyser.fftSize = 64;
-            analyser.smoothingTimeConstant = 0.8;
-
-            gainNode.connect(analyser);
-            analyser.connect(this.masterGain);
-
-            this.participantGains.set(speakerId, gainNode);
-            this.participantAnalysers.set(speakerId, analyser);
-        }
-        return gainNode;
     }
 
-    /**
-     * Получение частотных данных (FFT) для отрисовки анимации волны / спектра
-     * @param {string} userId ID пользователя или 'self' для микрофона
-     * @returns {Uint8Array|null} Массив амплитуд частот [0..255]
-     */
     getFrequencyData(userId) {
-        let analyser = null;
+        if (!this.audioCtx) return null;
+
         if (userId === 'self') {
-            analyser = this.localAnalyser;
-            if (this.isMuted) return null;
-        } else {
-            analyser = this.participantAnalysers.get(userId);
+            if (!this.analyserNode || this.isMuted) return null;
+            const data = new Uint8Array(this.analyserNode.frequencyBinCount);
+            this.analyserNode.getByteFrequencyData(data);
+            return data;
         }
 
-        if (!analyser) return null;
+        const participant = this.participants.get(userId);
+        if (!participant || !participant.analyser) return null;
 
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteFrequencyData(dataArray);
-        return dataArray;
-    }
-
-    /**
-     * Установка громкости отдельного участника
-     * @param {string} userId
-     * @param {number} volume [0.0 ... 2.0]
-     */
-    setParticipantVolume(userId, volume) {
-        const clamped = Math.max(0, Math.min(2, volume));
-        this.participantVolumes.set(userId, clamped);
-
-        const gainNode = this.participantGains.get(userId);
-        if (gainNode && this.audioContext) {
-            gainNode.gain.setValueAtTime(clamped, this.audioContext.currentTime);
-        }
-    }
-
-    /**
-     * Установка мастер-громкости
-     * @param {number} volume [0.0 ... 2.0]
-     */
-    setMasterVolume(volume) {
-        this.masterVolume = Math.max(0, Math.min(2, volume));
-        if (this.masterGain && this.audioContext) {
-            this.masterGain.gain.setValueAtTime(this.masterVolume, this.audioContext.currentTime);
-        }
-    }
-
-    /**
-     * Очистка ресурсов участника при выходе
-     * @param {string} userId
-     */
-    removeParticipant(userId) {
-        const analyser = this.participantAnalysers.get(userId);
-        if (analyser) {
-            try {
-                analyser.disconnect();
-            } catch (e) { }
-            this.participantAnalysers.delete(userId);
-        }
-
-        const gainNode = this.participantGains.get(userId);
-        if (gainNode) {
-            try {
-                gainNode.disconnect();
-            } catch (e) { }
-            this.participantGains.delete(userId);
-        }
-
-        this.participantVolumes.delete(userId);
-        this.speakerPlayTimes.delete(userId);
-    }
-
-    /**
-     * Полное уничтожение аудиоконтекста
-     */
-    async destroy() {
-        this.stopMicrophone();
-
-        this.participantAnalysers.forEach((analyser) => {
-            try {
-                analyser.disconnect();
-            } catch (e) { }
-        });
-        this.participantAnalysers.clear();
-
-        this.participantGains.forEach((gain) => {
-            try {
-                gain.disconnect();
-            } catch (e) { }
-        });
-        this.participantGains.clear();
-        this.participantVolumes.clear();
-        this.speakerPlayTimes.clear();
-
-        if (this.masterGain) {
-            try {
-                this.masterGain.disconnect();
-            } catch (e) { }
-            this.masterGain = null;
-        }
-
-        if (this.audioContext) {
-            await this.audioContext.close().catch(() => { });
-            this.audioContext = null;
-        }
-
-        this.workletLoaded = false;
-    }
-
-    /**
-     * Локальный расчет VAD
-     * @private
-     */
-    _calculateVAD(pcmBuffer, userId) {
-        if (typeof this.onSpeakingStateChange !== 'function') return;
-        const int16 = new Int16Array(pcmBuffer);
-        let sum = 0;
-        for (let i = 0; i < int16.length; i++) {
-            const s = int16[i] / 32768.0;
-            sum += s * s;
-        }
-        const rms = Math.sqrt(sum / int16.length);
-        this.onSpeakingStateChange(userId, rms > 0.012);
+        participant.analyser.getByteFrequencyData(participant.freqData);
+        return participant.freqData;
     }
 }
 
-// Глобальный инстанс
+// Глобальный экземпляр аудио-менеджера
 window.audioManager = new AudioManager();
