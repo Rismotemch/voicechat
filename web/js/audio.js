@@ -18,8 +18,8 @@ class AudioManager {
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000;
         this.frameDurationMs = options.frameDurationMs || 20;
-        this.jitterBufferMs = options.jitterBufferMs || 30;
-        this.maxDriftSec = options.maxDriftSec || 0.08;
+        this.jitterBufferMs = options.jitterBufferMs || 65;
+        this.maxDriftSec = options.maxDriftSec || 0.15;
 
         /** @type {AudioContext|null} */
         this.audioContext = null;
@@ -202,65 +202,71 @@ class AudioManager {
      * Воспроизведение входящего бинарного пакета от сервера.
      * @param {ArrayBuffer} arrayBuffer
      */
+    // Метод проигрывания пакета с мягким 1-мс фейдом на границах:
     playAudioPacket(arrayBuffer) {
-        if (!this.audioContext || arrayBuffer.byteLength < 4) return;
+        if (!this.audioCtx || this.audioCtx.state !== 'running') return;
 
-        const view = new DataView(arrayBuffer);
-        const idLen = view.getUint16(0, false);
-        let pcmOffset = 0;
-        let speakerId = 'default_stream';
+        const dataView = new DataView(arrayBuffer);
+        if (dataView.byteLength < 4) return;
 
-        if (idLen > 0 && arrayBuffer.byteLength >= 2 + idLen + 2) {
-            const idBytes = new Uint8Array(arrayBuffer, 2, idLen);
-            speakerId = new TextDecoder().decode(idBytes);
-            pcmOffset = 2 + idLen + (idLen % 2 !== 0 ? 1 : 0);
-        } else {
-            pcmOffset = 0;
-        }
+        const idLen = dataView.getUint16(0, false);
+        const padding = (idLen % 2 !== 0) ? 1 : 0;
+        const pcmOffset = 2 + idLen + padding;
 
-        const rawByteLength = arrayBuffer.byteLength - pcmOffset;
-        if (rawByteLength % 2 !== 0 || rawByteLength < 2) return;
+        if (dataView.byteLength <= pcmOffset) return;
 
-        const sampleCount = rawByteLength / 2;
-        const int16Array = new Int16Array(arrayBuffer, pcmOffset, sampleCount);
-        const float32Buffer = new Float32Array(sampleCount);
-        let energySum = 0;
+        const idBytes = new Uint8Array(arrayBuffer, 2, idLen);
+        const senderId = this.textDecoder.decode(idBytes);
 
+        const pcmByteLength = dataView.byteLength - pcmOffset;
+        const sampleCount = Math.floor(pcmByteLength / 2);
+        if (sampleCount === 0) return;
+
+        // Извлекаем PCM Int16 -> Float32
+        const float32Data = new Float32Array(sampleCount);
         for (let i = 0; i < sampleCount; i++) {
-            const s = int16Array[i] / 32768.0;
-            float32Buffer[i] = s;
-            energySum += s * s;
+            const int16 = dataView.getInt16(pcmOffset + i * 2, true);
+            float32Data[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        if (speakerId !== 'default_stream' && typeof this.onSpeakingStateChange === 'function') {
-            const rms = Math.sqrt(energySum / sampleCount);
-            this.onSpeakingStateChange(speakerId, rms > 0.012);
+        // -------------------------------------------------------------
+        // Micro-Fade Envelope (1 мс = 16 сэмплов): устраняет щелчки на стыках
+        // -------------------------------------------------------------
+        const fadeSamples = Math.min(16, Math.floor(sampleCount / 4));
+        for (let i = 0; i < fadeSamples; i++) {
+            const ramp = i / fadeSamples;
+            float32Data[i] *= ramp;                             // Fade In
+            float32Data[sampleCount - 1 - i] *= ramp;           // Fade Out
         }
 
-        const audioBuffer = this.audioContext.createBuffer(1, sampleCount, this.sampleRate);
-        audioBuffer.getChannelData(0).set(float32Buffer);
+        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
+        audioBuffer.getChannelData(0).set(float32Data);
 
-        const sourceNode = this.audioContext.createBufferSource();
-        sourceNode.buffer = audioBuffer;
-
-        // Маршрутизация через персональный AnalyserNode и GainNode
-        const targetGain = this._getParticipantGainNode(speakerId);
-        sourceNode.connect(targetGain);
-
-        // Индивидуальный джиттер-буфер для собеседника
-        const currentTime = this.audioContext.currentTime;
-        const jitterOffset = this.jitterBufferMs / 1000.0;
-        let nextPlayTime = this.speakerPlayTimes.get(speakerId) || 0;
-
-        if (nextPlayTime < currentTime) {
-            nextPlayTime = currentTime + jitterOffset;
-        } else if (nextPlayTime > currentTime + this.maxDriftSec) {
-            nextPlayTime = currentTime + jitterOffset;
+        let participant = this.participants.get(senderId);
+        if (!participant) {
+            participant = this.createParticipantAudioChain(senderId);
         }
 
-        sourceNode.start(nextPlayTime);
-        this.speakerPlayTimes.set(speakerId, nextPlayTime + audioBuffer.duration);
+        const now = this.audioCtx.currentTime;
+        const frameDuration = sampleCount / this.sampleRate;
+
+        // Адаптивное планирование без резких скачков
+        if (participant.nextPlayTime < now) {
+            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
+        } else if (participant.nextPlayTime - now > this.maxDriftSec) {
+            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
+        }
+
+        const source = this.audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(participant.gainNode);
+
+        source.start(participant.nextPlayTime);
+        participant.nextPlayTime += frameDuration;
+
+        this.triggerSpeaking(senderId);
     }
+
 
     /**
      * Получение или создание GainNode и AnalyserNode для участника
