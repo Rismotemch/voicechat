@@ -8,12 +8,15 @@ jobs:
   deploy:
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
       
-      - name: Build and Deploy
+      - name: Deploy
         run: |
           cd /opt/voicechat
+          git reset --hard
           git pull
-          docker compose down
-          docker system prune -af
-          docker compose up -d --build
+          docker stop voicechat || true
+          docker rm voicechat || true
+          docker compose build --no-cache
+          docker compose up -d
