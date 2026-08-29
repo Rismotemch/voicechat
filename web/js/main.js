@@ -225,44 +225,13 @@ if (window.voiceChatApp) {
         currentNode.connect(analyser);
         state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
         state.audioProcessor.onaudioprocess = (event) => {
-            if (!state.isJoined || state.isMuted) {
-                // Если не в комнате, отправляем тишину (1 байт)
-                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                    state.ws.send(new Uint8Array([0]));
-                }
-                return;
-            }
+            if (!state.isJoined || state.isMuted) return;
 
             const audioData = event.inputBuffer.getChannelData(0);
-            const dataArray = new Uint8Array(analyser.frequencyBinCount);
-            analyser.getByteTimeDomainData(dataArray);
+            const pcmData = floatToPCM16Optimized(audioData);
 
-            let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-                const value = (dataArray[i] - 128) / 128;
-                sum += value * value;
-            }
-            const rms = Math.sqrt(sum / dataArray.length);
-
-            if (rms < state.speakingThreshold) {
-                // Отправляем маркер тишины
-                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                    state.ws.send(new Uint8Array([0]));
-                }
-            } else {
-                const pcmData = floatToPCM16Optimized(audioData);
-                const header = new Uint8Array(3);
-                header[0] = 1;
-                header[1] = (pcmData.byteLength >> 8) & 0xFF;
-                header[2] = pcmData.byteLength & 0xFF;
-
-                const combined = new Uint8Array(header.length + pcmData.byteLength);
-                combined.set(header);
-                combined.set(new Uint8Array(pcmData), header.length);
-
-                if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                    state.ws.send(combined.buffer);
-                }
+            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+                state.ws.send(pcmData);
             }
         };
         analyser.connect(state.audioProcessor);
@@ -324,22 +293,47 @@ if (window.voiceChatApp) {
 
     function playRemoteAudio(userId, data) {
         if (!state.audioContext) return;
+
         const dataArray = new Uint8Array(data);
-        if (dataArray[0] === 1) { // старый формат без ID
-            const length = (dataArray[1] << 8) | dataArray[2];
-            const pcmData = dataArray.slice(3, 3 + length);
-            processPCMData(userId || 'remote', pcmData);
-            return;
+        // Игнорируем пустые данные
+        if (dataArray.length < 2) return;
+
+        // Если первый байт 0 — это тишина
+        if (dataArray[0] === 0) return;
+
+        // Пытаемся декодировать как PCM (простой формат: [тип][длина hi][длина lo][PCM])
+        let pcmBytes;
+        if (dataArray[0] === 1 && dataArray.length >= 3) {
+            const len = (dataArray[1] << 8) | dataArray[2];
+            pcmBytes = dataArray.slice(3, 3 + len);
+        } else {
+            // Возможно, это сырые PCM без заголовка
+            pcmBytes = dataArray;
         }
-        if (dataArray[0] === 2) { // новый формат с ID отправителя
-            if (dataArray.length < 5) return;
-            const idLength = (dataArray[1] << 24) | (dataArray[2] << 16) | (dataArray[3] << 8) | dataArray[4];
-            if (dataArray.length < 5 + idLength) return;
-            const senderID = new TextDecoder().decode(dataArray.slice(5, 5 + idLength));
-            const pcmData = dataArray.slice(5 + idLength);
-            processPCMData(senderID, pcmData);
-            return;
+
+        // Выравниваем до чётного
+        if (pcmBytes.length % 2 !== 0) {
+            pcmBytes = pcmBytes.slice(0, pcmBytes.length - 1);
         }
+        if (pcmBytes.length < 2) return;
+
+        const int16Array = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, pcmBytes.length / 2);
+        const float32Array = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i++) {
+            float32Array[i] = int16Array[i] / 32768.0;
+        }
+
+        const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
+        const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, state.sampleRate);
+        audioBuffer.getChannelData(0).set(float32Array);
+
+        const source = state.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        const gainNode = state.audioContext.createGain();
+        gainNode.gain.value = volume;
+        source.connect(gainNode);
+        gainNode.connect(state.audioContext.destination);
+        source.start();
     }
 
     function updateSpeakingIndicator(userId, isSpeaking) {
