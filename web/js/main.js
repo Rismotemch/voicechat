@@ -714,3 +714,92 @@ if (window.voiceChatApp) {
         return colors[Math.floor(Math.random() * colors.length)];
     }
 }
+function openCreateRoomModal() {
+    document.getElementById('createRoomModal').style.display = 'flex';
+}
+
+function closeCreateRoomModal() {
+    document.getElementById('createRoomModal').style.display = 'none';
+}
+
+function confirmCreateRoom() {
+    const roomName = document.getElementById('roomNameInput').value.trim();
+    const password = document.getElementById('roomPasswordInput').value;
+    const maxUsers = parseInt(document.getElementById('roomMaxUsersInput').value) || 25;
+    const catInBagMode = document.getElementById('catInBagMode').checked;
+    const spatialAudioMode = document.getElementById('spatialAudioMode').checked;
+    const highQualityMode = document.getElementById('highQualityMode').checked;
+
+    if (!roomName) {
+        alert('Введите название комнаты');
+        return;
+    }
+
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        connectWebSocket().then(() => {
+            sendJSONMessage('create_room', {
+                roomName: roomName,
+                password: password || undefined,
+                maxUsers: maxUsers,
+                catInBagMode: catInBagMode,
+                spatialAudioMode: spatialAudioMode,
+                highQualityMode: highQualityMode
+            });
+        });
+    } else {
+        sendJSONMessage('create_room', {
+            roomName: roomName,
+            password: password || undefined,
+            maxUsers: maxUsers,
+            catInBagMode: catInBagMode,
+            spatialAudioMode: spatialAudioMode,
+            highQualityMode: highQualityMode
+        });
+    }
+
+    closeCreateRoomModal();
+    document.getElementById('roomNameInput').value = '';
+    document.getElementById('roomPasswordInput').value = '';
+}
+
+function openPasswordModal(roomId) {
+    pendingRoomId = roomId;
+    document.getElementById('passwordModal').style.display = 'flex';
+}
+
+function closePasswordModal() {
+    pendingRoomId = null;
+    document.getElementById('passwordModal').style.display = 'none';
+}
+
+function confirmPassword() {
+    const password = document.getElementById('roomPasswordCheckInput').value;
+
+    if (pendingRoomId) {
+        selectRoom(pendingRoomId, null, password);
+    }
+
+    closePasswordModal();
+    document.getElementById('roomPasswordCheckInput').value = '';
+}
+
+function selectRoom(roomId, roomName, password) {
+    selectedRoomId = roomId;
+    selectedRoomName = roomName || roomId;
+    currentRoomPassword = password || null;
+
+    // Обновляем метку
+    const currentRoomLabel = document.getElementById('currentRoomLabel');
+    if (currentRoomLabel) {
+        currentRoomLabel.textContent = `Комната: ${selectedRoomName}`;
+    }
+
+    // Показываем панель подключения
+    document.getElementById('roomSelectionPanel').style.display = 'none';
+    document.getElementById('connectionPanel').style.display = 'block';
+
+    const selectedRoomInfo = document.getElementById('selectedRoomInfo');
+    if (selectedRoomInfo) {
+        selectedRoomInfo.innerHTML = `<strong>Комната:</strong> ${selectedRoomName}<br><small>Нажмите "Присоединиться"</small>`;
+    }
+}
