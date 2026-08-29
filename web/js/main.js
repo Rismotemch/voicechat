@@ -73,6 +73,17 @@ if (window.voiceChatApp) {
         if (roomElements.backToRoomsBtn) {
             roomElements.backToRoomsBtn.addEventListener('click', showRoomSelection);
         }
+
+        // Внутри setupEventListeners() добавьте:
+        const refreshRoomsBtn = document.getElementById('refreshRoomsBtn');
+        if (refreshRoomsBtn) {
+            refreshRoomsBtn.addEventListener('click', () => {
+                if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+                    connectWebSocket();
+                }
+                sendJSONMessage('get_rooms', {});
+            });
+        }
     }
 
     function setupSettingsListeners() {
@@ -534,6 +545,12 @@ if (window.voiceChatApp) {
     function selectRoom(roomId, roomName) {
         selectedRoomId = roomId;
         selectedRoomName = roomName;
+
+        // Обновляем метку в шапке
+        const currentRoomLabel = document.getElementById('currentRoomLabel');
+        if (currentRoomLabel) {
+            currentRoomLabel.textContent = `Комната: ${roomName}`;
+        }
 
         if (roomElements.roomSelectionPanel) {
             roomElements.roomSelectionPanel.style.display = 'none';
