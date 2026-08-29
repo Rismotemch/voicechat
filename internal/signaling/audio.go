@@ -132,7 +132,7 @@ func (f *BiquadFilter) Reset() {
 }
 
 // =============================================================================
-// DSP Pipeline Клиента с поддержкой голосовых эффектов
+// DSP Pipeline Клиента
 // =============================================================================
 
 type AudioProcessor struct {
@@ -142,7 +142,6 @@ type AudioProcessor struct {
 	currentGain   float32
 	activeFilter  string
 
-	// Дополнительные DSP узлы для спецэффектов
 	radioHPFilter *BiquadFilter
 	radioLPFilter *BiquadFilter
 	megaphoneBP   *BiquadFilter
@@ -172,17 +171,17 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 1. Базовый High-Pass фильтр (удаление 50/60Гц гула микрофона)
+	// 1. High-Pass фильтрация
 	p.hpFilter.Process(samples, samples)
 
-	// 2. Расчет среднеквадратичной энергии (RMS)
+	// 2. Расчет RMS
 	var sum float32
 	for i := 0; i < n; i++ {
 		sum += samples[i] * samples[i]
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. VAD с таймером Hangover
+	// 3. VAD с таймером удержания (Hangover)
 	if rms >= VADEnergyThreshold {
 		p.hangoverCount = VADHangoverFrames
 		p.isSpeaking = true
@@ -197,10 +196,10 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 4. Применение спецэффектов голоса
+	// 4. Применение спецэффектов
 	p.applyVoiceEffects(samples)
 
-	// 5. AGC (Automatic Gain Control)
+	// 5. AGC (Автоматическая регулировка усиления)
 	if rms > 0.001 {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
@@ -211,7 +210,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		p.currentGain = p.currentGain*0.9 + desiredGain*0.1
 	}
 
-	// 6. Усиление и Soft Limiting (кубическая компрессия)
+	// 6. Усиление и Soft Limiting
 	for i := 0; i < n; i++ {
 		val := samples[i] * p.currentGain
 		if val > 1.0 {
@@ -233,7 +232,6 @@ func (p *AudioProcessor) applyVoiceEffects(samples []float32) {
 
 	switch p.activeFilter {
 	case "radio":
-		// Полосовой срез + насыщение (distortion)
 		p.radioHPFilter.Process(samples, samples)
 		p.radioLPFilter.Process(samples, samples)
 		for i := 0; i < n; i++ {
@@ -247,7 +245,6 @@ func (p *AudioProcessor) applyVoiceEffects(samples []float32) {
 		}
 
 	case "robot":
-		// Ring Modulation несущей частотой 50 Гц
 		freq := 50.0
 		phaseStep := (twoPi * freq) / SampleRate
 		for i := 0; i < n; i++ {
@@ -260,7 +257,6 @@ func (p *AudioProcessor) applyVoiceEffects(samples []float32) {
 		}
 
 	case "megaphone":
-		// Резонансный узкополосный фильтр + жесткий клиппинг
 		p.megaphoneBP.Process(samples, samples)
 		for i := 0; i < n; i++ {
 			s := samples[i] * 3.0
@@ -273,7 +269,6 @@ func (p *AudioProcessor) applyVoiceEffects(samples []float32) {
 		}
 
 	case "demon":
-		// Низкочастотная субмодуляция 28 Гц + срез высоких частот
 		p.demonLPFilter.Process(samples, samples)
 		freq := 28.0
 		phaseStep := (twoPi * freq) / SampleRate
@@ -307,17 +302,18 @@ func (p *AudioProcessor) Reset() {
 type AudioClient struct {
 	ID        string
 	UserID    string
-	Send      chan []byte
+	Send      chan []byte // Прямая ссылка на исходящий канал WebSocket-сессии
 	IsMuted   bool
 	Processor *AudioProcessor
 	mu        sync.RWMutex
 }
 
-func NewAudioClient(id, userID string, sendBufSize int) *AudioClient {
+// NewAudioClient инициализирует клиентский аудио-узел с рабочим WebSocket каналом
+func NewAudioClient(id, userID string, sendChan chan []byte) *AudioClient {
 	return &AudioClient{
 		ID:        id,
 		UserID:    userID,
-		Send:      make(chan []byte, sendBufSize),
+		Send:      sendChan,
 		IsMuted:   false,
 		Processor: NewAudioProcessor(),
 	}

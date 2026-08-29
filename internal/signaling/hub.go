@@ -118,7 +118,7 @@ func (h *Hub) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	maxSize := h.cfg.MaxUploadSize
 	if maxSize <= 0 {
-		maxSize = 50 << 20 // 50 MB по умолчанию
+		maxSize = 50 << 20 // 50 MB
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
@@ -160,7 +160,6 @@ func (h *Hub) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Определение базовой категории типа файла
 	fileType := "file"
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg":
@@ -358,7 +357,6 @@ func (c *Client) handleTextMessage(data []byte) {
 	case "get_rooms":
 		c.handleGetRooms()
 
-	// --- Микро-чат и файлы ---
 	case "send_message":
 		var p SendChatMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
@@ -370,14 +368,12 @@ func (c *Client) handleTextMessage(data []byte) {
 			c.handleSendFile(p)
 		}
 
-	// --- Голосовые DSP-фильтры ---
 	case "set_voice_filter":
 		var p SetVoiceFilterMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
 			c.handleSetVoiceFilter(p)
 		}
 
-	// --- Телеметрия (RTT / Ping) ---
 	case "ping":
 		var p PingMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
@@ -389,7 +385,6 @@ func (c *Client) handleTextMessage(data []byte) {
 			c.handlePingReport(p)
 		}
 
-	// --- Хост-контроль ---
 	case "kick_user":
 		var p KickUserMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
@@ -450,7 +445,8 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		return
 	}
 
-	audioClient := NewAudioClient(c.ID, user.ID, sendChannelCap)
+	// Передаем реальный канал сокета c.Send
+	audioClient := NewAudioClient(c.ID, user.ID, c.Send)
 	audioHub.AddClient(audioClient)
 
 	c.mu.Lock()
@@ -459,7 +455,6 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.AudioClient = audioClient
 	c.mu.Unlock()
 
-	// Отправляем состояние комнаты вместе с историей сообщений чата
 	c.sendJSON("room_state", map[string]interface{}{
 		"users":    room.GetUsers(),
 		"messages": room.GetMessages(),
@@ -658,10 +653,6 @@ func (c *Client) handleGetRooms() {
 	})
 }
 
-// =============================================================================
-// Пинг и Телеметрия
-// =============================================================================
-
 func (c *Client) handlePing(msg PingMessage) {
 	c.sendJSON("pong", map[string]interface{}{
 		"clientTimestamp": msg.ClientTimestamp,
@@ -686,10 +677,6 @@ func (c *Client) handlePingReport(msg PingReportMessage) {
 		"pingMs": msg.PingMs,
 	}, "")
 }
-
-// =============================================================================
-// Хост-контроль
-// =============================================================================
 
 func (c *Client) handleKickUser(msg KickUserMessage) {
 	c.mu.RLock()
@@ -778,10 +765,6 @@ func (c *Client) handleMuteAll(msg MuteAllMessage) {
 	}
 	c.Hub.mu.RUnlock()
 }
-
-// =============================================================================
-// Вспомогательные методы
-// =============================================================================
 
 func (c *Client) handleAudioData(audioData []byte) {
 	c.mu.RLock()

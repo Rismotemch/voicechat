@@ -25,13 +25,17 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+html,
+body {
+    height: 100%;
+    height: 100dvh;
+    overflow: hidden;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
-    min-height: 100vh;
-    min-height: -webkit-fill-available;
-    overflow-x: hidden;
     position: relative;
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
@@ -55,25 +59,26 @@ body::before {
 #app {
     position: relative;
     z-index: 1;
-    min-height: 100vh;
+    height: 100%;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 /* =============================================================================
    Header & Unread Badge
 ============================================================================= */
 .header {
+    flex-shrink: 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 1rem 2rem;
+    padding: 0.85rem 1.75rem;
     background: rgba(18, 18, 31, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-bottom: 1px solid var(--border-glass);
-    position: sticky;
-    top: 0;
     z-index: 50;
 }
 
@@ -91,7 +96,7 @@ body::before {
 }
 
 .logo {
-    font-size: 1.4rem;
+    font-size: 1.35rem;
     font-weight: 700;
     letter-spacing: -0.5px;
     background: linear-gradient(135deg, #7c6cff, #c4b5fd, #7c6cff);
@@ -180,12 +185,16 @@ body::before {
 ============================================================================= */
 .main-content {
     flex: 1;
-    padding: 1.5rem;
+    min-height: 0;
+    /* Критично для корректного flex-scrolling */
+    padding: 1rem 1.5rem;
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 1.25rem;
+    justify-content: flex-start;
+    gap: 0.85rem;
+    overflow: hidden;
+    width: 100%;
 }
 
 .glass {
@@ -201,11 +210,12 @@ body::before {
    Панель Хост-контроля и Инвайтов
 ============================================================================= */
 .host-controls-bar {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 0.75rem;
-    padding: 0.6rem 1.2rem;
+    padding: 0.5rem 1.2rem;
     flex-wrap: wrap;
     max-width: 900px;
     width: 100%;
@@ -228,9 +238,9 @@ body::before {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid var(--border-glass);
     color: var(--text-primary);
-    padding: 0.45rem 1rem;
+    padding: 0.4rem 0.9rem;
     border-radius: 20px;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     font-weight: 600;
     cursor: pointer;
     transition: all var(--transition);
@@ -257,9 +267,10 @@ body::before {
 }
 
 /* =============================================================================
-   Панель комнат и списки
+   Панель комнат и списки (Лобби)
 ============================================================================= */
 .room-selection-panel {
+    margin: auto 0;
     padding: 2.2rem;
     max-width: 480px;
     width: 100%;
@@ -378,6 +389,7 @@ body::before {
    Connection Panel
 ============================================================================= */
 .connection-panel {
+    margin: auto 0;
     padding: 2.2rem;
     max-width: 420px;
     width: 100%;
@@ -400,27 +412,35 @@ body::before {
 }
 
 /* =============================================================================
-   Call Workspace: Сетка участников + Боковой чат
+   Call Workspace: Сетка участников + Боковой чат (Без глобального скролла)
 ============================================================================= */
 .call-workspace {
-    display: flex;
-    gap: 1.5rem;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
     width: 100%;
-    max-width: 1200px;
-    align-items: flex-start;
+    max-width: 1280px;
+    display: flex;
+    gap: 1.25rem;
+    align-items: stretch;
     justify-content: center;
+    overflow: hidden;
 }
 
 .participants-grid {
     flex: 1;
+    min-height: 0;
+    height: 100%;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-    gap: 1.25rem;
-    min-width: 0;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+    align-content: flex-start;
+    overflow-y: auto;
+    padding: 0.25rem;
 }
 
 .participant-card {
-    padding: 1.5rem 1.2rem;
+    padding: 1.25rem 1rem;
     text-align: center;
     transition: all var(--transition);
     position: relative;
@@ -439,24 +459,24 @@ body::before {
 .participant-card.muted::before {
     content: '🔇';
     position: absolute;
-    top: 10px;
-    right: 12px;
-    font-size: 0.9rem;
+    top: 8px;
+    right: 10px;
+    font-size: 0.85rem;
     z-index: 5;
 }
 
 /* Кнопка исключения (Kick) для Хоста */
 .kick-btn {
     position: absolute;
-    top: 10px;
-    left: 10px;
-    width: 24px;
-    height: 24px;
+    top: 8px;
+    left: 8px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     background: rgba(255, 82, 82, 0.15);
     border: 1px solid rgba(255, 82, 82, 0.3);
     color: var(--danger);
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: bold;
     cursor: pointer;
     display: flex;
@@ -475,11 +495,11 @@ body::before {
 /* Индикатор задержки (Ping Badge) */
 .ping-badge {
     position: absolute;
-    top: 10px;
-    right: 10px;
-    font-size: 0.7rem;
+    top: 8px;
+    right: 8px;
+    font-size: 0.68rem;
     font-weight: 700;
-    padding: 0.15rem 0.45rem;
+    padding: 0.15rem 0.4rem;
     border-radius: 10px;
     background: rgba(0, 0, 0, 0.4);
     border: 1px solid transparent;
@@ -504,9 +524,9 @@ body::before {
 /* Обертка аватара и визуализатор */
 .avatar-wrapper {
     position: relative;
-    width: 90px;
-    height: 90px;
-    margin: 0 auto 0.75rem;
+    width: 80px;
+    height: 80px;
+    margin: 0 auto 0.5rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -517,22 +537,22 @@ body::before {
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    width: 120px;
-    height: 120px;
+    width: 110px;
+    height: 110px;
     pointer-events: none;
     z-index: 1;
 }
 
 .avatar {
     position: relative;
-    width: 64px;
-    height: 64px;
+    width: 58px;
+    height: 58px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 700;
-    font-size: 1.5rem;
+    font-size: 1.4rem;
     color: white;
     user-select: none;
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
@@ -544,17 +564,17 @@ body::before {
     flex-direction: column;
     align-items: center;
     gap: 0.2rem;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.4rem;
 }
 
 .participant-name {
     font-weight: 600;
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 160px;
+    max-width: 150px;
 }
 
 .host-badge {
@@ -572,8 +592,10 @@ body::before {
    Боковой микро-чат (Chat Panel)
 ============================================================================= */
 .chat-panel {
+    flex-shrink: 0;
     width: 340px;
-    height: 520px;
+    height: 100%;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -593,15 +615,16 @@ body::before {
 }
 
 .chat-header {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 1rem 1.2rem;
+    padding: 0.8rem 1.1rem;
     border-bottom: 1px solid var(--border-glass);
 }
 
 .chat-header h3 {
-    font-size: 1.1rem;
+    font-size: 1rem;
     font-weight: 600;
 }
 
@@ -609,7 +632,7 @@ body::before {
     background: transparent;
     border: none;
     color: var(--text-secondary);
-    font-size: 1.2rem;
+    font-size: 1.1rem;
     cursor: pointer;
     padding: 0.2rem;
     transition: color var(--transition);
@@ -621,11 +644,12 @@ body::before {
 
 .chat-messages {
     flex: 1;
-    padding: 1rem;
+    min-height: 0;
+    padding: 0.85rem;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.65rem;
 }
 
 .chat-msg-row {
@@ -643,17 +667,17 @@ body::before {
 }
 
 .chat-msg-author {
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     color: var(--text-secondary);
-    margin-bottom: 0.2rem;
-    padding: 0 0.4rem;
+    margin-bottom: 0.15rem;
+    padding: 0 0.3rem;
 }
 
 .chat-bubble {
-    padding: 0.65rem 0.9rem;
+    padding: 0.55rem 0.85rem;
     border-radius: 14px;
-    font-size: 0.9rem;
-    line-height: 1.4;
+    font-size: 0.88rem;
+    line-height: 1.35;
     word-break: break-word;
 }
 
@@ -671,18 +695,17 @@ body::before {
 }
 
 .chat-msg-time {
-    font-size: 0.65rem;
+    font-size: 0.62rem;
     opacity: 0.7;
-    margin-top: 0.25rem;
+    margin-top: 0.2rem;
     text-align: right;
 }
 
-/* Превью изображений и файлов в чате */
 .chat-img-preview {
     max-width: 100%;
-    max-height: 180px;
+    max-height: 160px;
     border-radius: 8px;
-    margin-top: 0.3rem;
+    margin-top: 0.25rem;
     cursor: pointer;
     display: block;
     object-fit: cover;
@@ -691,15 +714,15 @@ body::before {
 .chat-file-attachment {
     display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.6rem;
+    gap: 0.4rem;
+    padding: 0.35rem 0.55rem;
     background: rgba(0, 0, 0, 0.25);
     border-radius: 8px;
     color: inherit;
     text-decoration: none;
     font-weight: 500;
-    margin-top: 0.3rem;
-    font-size: 0.85rem;
+    margin-top: 0.25rem;
+    font-size: 0.82rem;
     transition: background var(--transition);
 }
 
@@ -708,10 +731,11 @@ body::before {
 }
 
 .chat-form {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.75rem 1rem;
+    gap: 0.4rem;
+    padding: 0.65rem 0.85rem;
     border-top: 1px solid var(--border-glass);
     background: rgba(0, 0, 0, 0.2);
 }
@@ -719,10 +743,10 @@ body::before {
 .chat-icon-btn {
     background: transparent;
     border: none;
-    font-size: 1.2rem;
+    font-size: 1.15rem;
     cursor: pointer;
     color: var(--text-secondary);
-    padding: 0.3rem;
+    padding: 0.25rem;
     transition: color var(--transition);
 }
 
@@ -735,9 +759,9 @@ body::before {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid var(--border-glass);
     border-radius: 20px;
-    padding: 0.5rem 0.9rem;
+    padding: 0.45rem 0.85rem;
     color: var(--text-primary);
-    font-size: 0.88rem;
+    font-size: 0.85rem;
     outline: none;
 }
 
@@ -750,13 +774,13 @@ body::before {
     color: white;
     border: none;
     border-radius: 50%;
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     transition: all var(--transition);
 }
 
@@ -832,13 +856,12 @@ body::before {
    Footer Controls
 ============================================================================= */
 .footer {
-    padding: 1.2rem 2rem;
+    flex-shrink: 0;
+    padding: 1rem 2rem;
     background: rgba(18, 18, 31, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-top: 1px solid var(--border-glass);
-    position: sticky;
-    bottom: 0;
     z-index: 50;
 }
 
@@ -849,13 +872,13 @@ body::before {
 }
 
 .control-btn {
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
     border-radius: 50%;
     background: var(--bg-glass);
     border: 1px solid var(--border-glass);
     color: var(--text-primary);
-    font-size: 1.6rem;
+    font-size: 1.5rem;
     cursor: pointer;
     transition: all var(--transition);
     display: flex;
@@ -1012,12 +1035,14 @@ body::before {
 ============================================================================= */
 .rooms-list::-webkit-scrollbar,
 .chat-messages::-webkit-scrollbar,
+.participants-grid::-webkit-scrollbar,
 .modal-content::-webkit-scrollbar {
     width: 5px;
 }
 
 .rooms-list::-webkit-scrollbar-thumb,
 .chat-messages::-webkit-scrollbar-thumb,
+.participants-grid::-webkit-scrollbar-thumb,
 .modal-content::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.15);
     border-radius: 4px;
@@ -1029,26 +1054,29 @@ body::before {
     }
 
     .main-content {
-        padding: 1rem 0.75rem;
+        padding: 0.75rem 0.5rem;
     }
 
     .call-workspace {
-        flex-direction: column;
+        position: relative;
     }
 
     .chat-panel {
+        position: absolute;
+        inset: 0;
         width: 100%;
-        height: 380px;
+        height: 100%;
+        z-index: 40;
     }
 
     .participants-grid {
         grid-template-columns: repeat(2, 1fr);
-        gap: 0.75rem;
+        gap: 0.65rem;
     }
 
     .host-controls-bar {
         gap: 0.4rem;
-        padding: 0.5rem;
+        padding: 0.4rem;
     }
 
     .action-chip {
@@ -1057,8 +1085,8 @@ body::before {
     }
 
     .control-btn {
-        width: 50px;
-        height: 50px;
-        font-size: 1.4rem;
+        width: 48px;
+        height: 48px;
+        font-size: 1.35rem;
     }
 }
