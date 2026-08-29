@@ -50,12 +50,16 @@ type JoinMessage struct {
 	UserName    string `json:"userName"`
 	AvatarColor string `json:"avatarColor"`
 	RoomID      string `json:"roomId"`
+	Password    string `json:"password,omitempty"`
 }
 
 type CreateRoomMessage struct {
-	RoomName string `json:"roomName"`
-	Password string `json:"password,omitempty"`
-	MaxUsers int    `json:"maxUsers,omitempty"`
+	RoomName         string `json:"roomName"`
+	Password         string `json:"password,omitempty"`
+	MaxUsers         int    `json:"maxUsers,omitempty"`
+	CatInBagMode     bool   `json:"catInBagMode,omitempty"`
+	SpatialAudioMode bool   `json:"spatialAudioMode,omitempty"`
+	HighQualityMode  bool   `json:"highQualityMode,omitempty"`
 }
 
 type RoomCreatedMessage struct {
@@ -96,6 +100,7 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 
 	// Создаём комнату по умолчанию
 	defaultRoom := models.NewRoom("main", cfg.MaxUsers)
+	defaultRoom.ID = "main"
 	hub.rooms["main"] = defaultRoom
 
 	log.Info().
@@ -238,8 +243,17 @@ func (c *Client) handleJoin(msg JoinMessage) {
 
 	room := c.Hub.getRoom(roomID)
 	if room == nil {
+		c.Hub.log.Warn().Str("roomId", roomID).Msg("Room not found")
 		c.sendError("Room not found")
 		return
+	}
+
+	// Проверяем пароль если он установлен
+	if room.Password != "" {
+		if msg.Password != room.Password {
+			c.sendError("Invalid password")
+			return
+		}
 	}
 
 	user := &models.User{
@@ -263,13 +277,11 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		Str("room", room.Name).
 		Msg("User joined room")
 
-	// Отправляем состояние комнаты
 	roomState := RoomStateMessage{
 		Users: room.GetUsers(),
 	}
 	c.sendJSON("room_state", roomState)
 
-	// Уведомляем других
 	for _, client := range c.Hub.getClientsInRoom(room.ID) {
 		if client.ID != c.ID {
 			client.sendJSON("user_joined", UserJoinedMessage{User: user})
@@ -278,13 +290,14 @@ func (c *Client) handleJoin(msg JoinMessage) {
 }
 
 func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
-	roomID := generateRoomID(msg.RoomName)
+	roomID := "room_" + uuid.New().String()[:8]
 
 	room := models.NewRoom(msg.RoomName, msg.MaxUsers)
-	if room == nil {
-		c.sendError("Failed to create room")
-		return
-	}
+	room.ID = roomID
+	room.Password = msg.Password
+	room.CatInBagMode = msg.CatInBagMode
+	room.SpatialAudioMode = msg.SpatialAudioMode
+	room.HighQualityMode = msg.HighQualityMode
 
 	c.Hub.mu.Lock()
 	c.Hub.rooms[roomID] = room
@@ -293,6 +306,7 @@ func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
 	c.Hub.log.Info().
 		Str("roomId", roomID).
 		Str("roomName", msg.RoomName).
+		Bool("hasPassword", msg.Password != "").
 		Msg("Room created")
 
 	c.sendJSON("room_created", RoomCreatedMessage{Room: room})
@@ -429,8 +443,4 @@ func (h *Hub) Close() {
 	for _, client := range h.clients {
 		client.Conn.Close()
 	}
-}
-
-func generateRoomID(roomName string) string {
-	return "room_" + uuid.New().String()[:8]
 }

@@ -14,26 +14,25 @@ type User struct {
 	AvatarColor string    `json:"avatarColor"`
 	JoinedAt    time.Time `json:"joinedAt"`
 	IsSpeaking  bool      `json:"isSpeaking"`
-	Position    *Position `json:"position,omitempty"`
-}
-
-type Position struct {
-	X         float64 `json:"x"`
-	Y         float64 `json:"y"`
-	Z         float64 `json:"z"`
-	Dimension string  `json:"dimension"`
 }
 
 type Room struct {
-	mu        sync.RWMutex
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Users     map[string]*User `json:"users"`
-	MaxUsers  int              `json:"maxUsers"`
-	CreatedAt time.Time        `json:"createdAt"`
+	mu               sync.RWMutex
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	Users            map[string]*User `json:"users"`
+	MaxUsers         int              `json:"maxUsers"`
+	Password         string           `json:"password,omitempty"`
+	CatInBagMode     bool             `json:"catInBagMode,omitempty"`
+	SpatialAudioMode bool             `json:"spatialAudioMode,omitempty"`
+	HighQualityMode  bool             `json:"highQualityMode,omitempty"`
+	CreatedAt        time.Time        `json:"createdAt"`
 }
 
 func NewRoom(name string, maxUsers int) *Room {
+	if maxUsers <= 0 {
+		maxUsers = 25
+	}
 	return &Room{
 		ID:        uuid.New().String(),
 		Name:      name,
@@ -85,7 +84,6 @@ func (r *Room) Count() int {
 	return len(r.Users)
 }
 
-// Errors
 var (
 	ErrRoomFull = fmt.Errorf("room is full")
 )
