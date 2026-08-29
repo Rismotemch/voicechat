@@ -50,6 +50,8 @@ if (window.voiceChatApp) {
 
     let selectedRoomId = 'main';
     let selectedRoomName = 'main';
+    let currentRoomPassword = null;
+    let pendingRoomId = null;
 
     document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
@@ -66,6 +68,17 @@ if (window.voiceChatApp) {
         if (elements.userName) elements.userName.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') joinRoom();
         });
+        const createRoomBtn = document.getElementById('createRoomBtn');
+        const confirmCreateRoomBtn = document.getElementById('confirmCreateRoomBtn');
+        const cancelCreateRoomBtn = document.getElementById('cancelCreateRoomBtn');
+        const confirmPasswordBtn = document.getElementById('confirmPasswordBtn');
+        const cancelPasswordBtn = document.getElementById('cancelPasswordBtn');
+
+        if (createRoomBtn) createRoomBtn.addEventListener('click', openCreateRoomModal);
+        if (confirmCreateRoomBtn) confirmCreateRoomBtn.addEventListener('click', confirmCreateRoom);
+        if (cancelCreateRoomBtn) cancelCreateRoomBtn.addEventListener('click', closeCreateRoomModal);
+        if (confirmPasswordBtn) confirmPasswordBtn.addEventListener('click', confirmPassword);
+        if (cancelPasswordBtn) cancelPasswordBtn.addEventListener('click', closePasswordModal);
 
         if (roomElements.createRoomBtn) {
             roomElements.createRoomBtn.addEventListener('click', createRoom);

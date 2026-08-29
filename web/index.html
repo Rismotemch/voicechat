@@ -23,7 +23,7 @@
         <header class="header">
             <div class="header-left">
                 <h1 class="logo">🎙️ VoiceChat</h1>
-                <span id="currentRoomLabel" class="room-name">Комната: main</span>
+                <span id="currentRoomLabel" class="room-name">Выберите комнату</span>
             </div>
             <div class="header-right">
                 <button id="settingsBtn" class="icon-btn" title="Настройки">⚙️</button>
@@ -38,21 +38,14 @@
                 <div id="roomsList" class="rooms-list">
                     <!-- Комнаты будут добавлены здесь -->
                 </div>
-                <div class="create-room-form">
-                    <input type="text" id="newRoomName" placeholder="Название новой комнаты" maxlength="30">
-                    <button id="createRoomBtn" class="primary-btn">Создать комнату</button>
-                </div>
                 <button id="refreshRoomsBtn" class="secondary-btn">🔄 Обновить список</button>
+                <button id="createRoomBtn" class="primary-btn">➕ Создать комнату</button>
             </div>
 
             <!-- Connection panel -->
             <div id="connectionPanel" class="connection-panel glass" style="display: none;">
                 <h2>Присоединиться</h2>
                 <div id="selectedRoomInfo" class="selected-room-info"></div>
-                <div class="input-group">
-                    <label for="userName">Ваше имя:</label>
-                    <input type="text" id="userName" placeholder="Введите имя" maxlength="30">
-                </div>
                 <button id="joinBtn" class="primary-btn">Присоединиться</button>
                 <button id="backToRoomsBtn" class="secondary-btn">← Назад к комнатам</button>
             </div>
@@ -76,6 +69,12 @@
     <div id="settingsModal" class="modal" style="display: none;">
         <div class="modal-content glass">
             <h3>Настройки</h3>
+
+            <div class="settings-section">
+                <h4>Профиль</h4>
+                <label for="settingsUserName">Ваше имя:</label>
+                <input type="text" id="settingsUserName" placeholder="Введите имя" maxlength="30">
+            </div>
 
             <div class="settings-section">
                 <h4>Микрофон</h4>
@@ -103,7 +102,61 @@
                 </label>
             </div>
 
-            <button id="closeSettingsBtn" class="primary-btn">Закрыть</button>
+            <button id="closeSettingsBtn" class="primary-btn">Сохранить и закрыть</button>
+        </div>
+    </div>
+
+    <!-- Create Room Modal -->
+    <div id="createRoomModal" class="modal" style="display: none;">
+        <div class="modal-content glass">
+            <h3>Создание комнаты</h3>
+
+            <div class="settings-section">
+                <label for="roomNameInput">Название комнаты:</label>
+                <input type="text" id="roomNameInput" placeholder="Например: Игровая" maxlength="30">
+            </div>
+
+            <div class="settings-section">
+                <label for="roomPasswordInput">Пароль (необязательно):</label>
+                <input type="password" id="roomPasswordInput" placeholder="Пароль" maxlength="50">
+            </div>
+
+            <div class="settings-section">
+                <label for="roomMaxUsersInput">Максимум участников:</label>
+                <input type="number" id="roomMaxUsersInput" min="2" max="100" value="25">
+            </div>
+
+            <div class="settings-section">
+                <h4>Особые режимы</h4>
+                <label>
+                    <input type="checkbox" id="catInBagMode">
+                    🐱 Режим "Кот в мешке" (случайные голосовые фильтры)
+                </label>
+                <label>
+                    <input type="checkbox" id="spatialAudioMode">
+                    🔊 Пространственное аудио
+                </label>
+                <label>
+                    <input type="checkbox" id="highQualityMode">
+                    🎵 Высокое качество звука
+                </label>
+            </div>
+
+            <button id="confirmCreateRoomBtn" class="primary-btn">Создать</button>
+            <button id="cancelCreateRoomBtn" class="secondary-btn">Отмена</button>
+        </div>
+    </div>
+
+    <!-- Password Modal -->
+    <div id="passwordModal" class="modal" style="display: none;">
+        <div class="modal-content glass">
+            <h3>Введите пароль</h3>
+            <div class="settings-section">
+                <label for="roomPasswordCheckInput">Пароль для комнаты:</label>
+                <input type="password" id="roomPasswordCheckInput" placeholder="Пароль" maxlength="50">
+            </div>
+            <button id="confirmPasswordBtn" class="primary-btn">Войти</button>
+            <button id="cancelPasswordBtn" class="secondary-btn">Отмена</button>
         </div>
     </div>
 
