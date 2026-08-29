@@ -5,7 +5,7 @@ FROM golang:1.26.5-alpine AS builder
 
 WORKDIR /src
 
-# Установка системных утилит сборки и сертификатов
+# Установка системных утилит сборки
 RUN apk add --no-cache git ca-certificates tzdata
 
 # Кэширование зависимостей Go
@@ -22,9 +22,6 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /bin/voicechat \
     ./cmd/server
 
-# Создание непривилегированного пользователя для запуска
-RUN adduser -D -g '' -u 10001 appuser
-
 # =============================================================================
 # Stage 2: Финальный минималистичный Runtime-образ
 # =============================================================================
@@ -32,12 +29,12 @@ FROM alpine:3.20
 
 WORKDIR /app
 
-# Установка корневых сертификатов TLS и таймзон
+# Установка корневых сертификатов, утилит, создание пользователя и структуры папок
 RUN apk add --no-cache ca-certificates tzdata curl && \
+    adduser -D -u 10001 appuser && \
     mkdir -p /app/data/uploads /app/web
 
-# Копирование пользователя и бинарника из builder-слоя
-COPY --from=builder /etc/passwd /etc/passwd
+# Копирование скомпилированного бинарника из builder-слоя
 COPY --from=builder /bin/voicechat /usr/local/bin/voicechat
 
 # Копирование статических файлов веб-клиента
@@ -49,7 +46,7 @@ RUN chown -R appuser:appuser /app
 # Переключение на непривилегированного пользователя
 USER appuser
 
-# Экспонируем только HTTP/WebSocket порт
+# Экспонируем HTTP/WebSocket порт
 EXPOSE 8080
 
 # Переменные окружения по умолчанию
