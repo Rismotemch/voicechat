@@ -202,7 +202,8 @@ if (window.voiceChatApp) {
     }
 
     async function startMicrophone() {
-        await initAudioProcessing();
+        await initAudioContext();
+
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: state.echoCancellationEnabled,
@@ -213,17 +214,33 @@ if (window.voiceChatApp) {
             },
             video: false
         });
+
         const source = state.audioContext.createMediaStreamSource(state.microphoneStream);
-        let currentNode = source;
-        for (const processor of state.processingChain) {
-            currentNode.connect(processor);
-            currentNode = processor;
-        }
-        const analyser = state.audioContext.createAnalyser();
-        analyser.fftSize = 512;
-        analyser.smoothingTimeConstant = 0.8;
-        currentNode.connect(analyser);
+
+        // Фильтр высоких частот (убираем низкий гул)
+        const highpass = state.audioContext.createBiquadFilter();
+        highpass.type = 'highpass';
+        highpass.frequency.value = 80;
+        highpass.Q.value = 0.7;
+
+        // Усиление речевых частот
+        const presence = state.audioContext.createBiquadFilter();
+        presence.type = 'peaking';
+        presence.frequency.value = 2500;
+        presence.Q.value = 1.0;
+        presence.gain.value = 3;
+
+        // Компрессор для выравнивания громкости
+        const compressor = state.audioContext.createDynamicsCompressor();
+        compressor.threshold.value = -20;
+        compressor.knee.value = 10;
+        compressor.ratio.value = 6;
+        compressor.attack.value = 0.005;
+        compressor.release.value = 0.1;
+
+        // Создаём обработчик
         state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
+
         state.audioProcessor.onaudioprocess = (event) => {
             if (!state.isJoined || state.isMuted) return;
 
@@ -234,7 +251,12 @@ if (window.voiceChatApp) {
                 state.ws.send(pcmData);
             }
         };
-        analyser.connect(state.audioProcessor);
+
+        // Подключаем цепочку
+        source.connect(highpass);
+        highpass.connect(presence);
+        presence.connect(compressor);
+        compressor.connect(state.audioProcessor);
         state.audioProcessor.connect(state.audioContext.destination);
     }
 
@@ -295,23 +317,17 @@ if (window.voiceChatApp) {
         if (!state.audioContext) return;
 
         const dataArray = new Uint8Array(data);
-        // Игнорируем пустые данные
         if (dataArray.length < 2) return;
-
-        // Если первый байт 0 — это тишина
         if (dataArray[0] === 0) return;
 
-        // Пытаемся декодировать как PCM (простой формат: [тип][длина hi][длина lo][PCM])
         let pcmBytes;
         if (dataArray[0] === 1 && dataArray.length >= 3) {
             const len = (dataArray[1] << 8) | dataArray[2];
             pcmBytes = dataArray.slice(3, 3 + len);
         } else {
-            // Возможно, это сырые PCM без заголовка
             pcmBytes = dataArray;
         }
 
-        // Выравниваем до чётного
         if (pcmBytes.length % 2 !== 0) {
             pcmBytes = pcmBytes.slice(0, pcmBytes.length - 1);
         }
@@ -321,6 +337,20 @@ if (window.voiceChatApp) {
         const float32Array = new Float32Array(int16Array.length);
         for (let i = 0; i < int16Array.length; i++) {
             float32Array[i] = int16Array[i] / 32768.0;
+        }
+
+        // Определяем RMS
+        let sum = 0;
+        for (let i = 0; i < float32Array.length; i++) {
+            sum += float32Array[i] * float32Array[i];
+        }
+        const rms = Math.sqrt(sum / float32Array.length);
+
+        // Обновляем индикатор
+        if (rms > 0.01) {
+            updateSpeakingIndicator(userId, true);
+        } else {
+            updateSpeakingIndicator(userId, false);
         }
 
         const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
