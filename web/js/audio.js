@@ -1,27 +1,28 @@
 /**
  * VoiceChat Audio Engine - web/js/audio.js
- * Cross-browser Web Audio API pipeline with Safari/iOS unlock,
- * Jitter-buffer scheduling, PCM-16 decoding & Micro-Fading.
+ * Optimized Web Audio API pipeline:
+ * - Real-time downsampling (48kHz/44.1kHz -> 16kHz)
+ * - Seamless sample-accurate scheduling (no 50Hz modulation buzz)
+ * - Safari/iOS auto-unlocking & zero-latency playback
  */
 
 class AudioManager {
     constructor(options = {}) {
-        this.sampleRate = options.sampleRate || 16000;
-        this.frameDurationMs = options.frameDurationMs || 20;
-        this.samplesPerFrame = (this.sampleRate * this.frameDurationMs) / 1000; // 320 сэмплов
-        this.jitterBufferMs = options.jitterBufferMs || 60; // 60 мс джиттер-буфер
-        this.maxDriftSec = options.maxDriftSec || 0.15;
+        this.targetSampleRate = 16000; // Целевая частота DSP-сервера
+        this.frameDurationMs = 20;     // 20 мс
+        this.samplesPerFrame = (this.targetSampleRate * this.frameDurationMs) / 1000; // 320 сэмплов
+        this.jitterBufferMs = options.jitterBufferMs || 40; // 40 мс стартовый буфер
+        this.maxDriftSec = options.maxDriftSec || 0.12;
 
         this.audioCtx = null;
         this.micStream = null;
         this.micSourceNode = null;
-        this.micGainNode = null;
         this.micProcessorNode = null;
 
         this.masterGainNode = null;
         this.analyserNode = null;
 
-        this.participants = new Map(); // senderId -> { gainNode, pannerNode, nextPlayTime, analyser, freqData }
+        this.participants = new Map(); // senderId -> { gainNode, nextPlayTime, analyser, freqData }
         this.speakingTimeouts = new Map();
 
         this.isMuted = false;
@@ -44,19 +45,15 @@ class AudioManager {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
 
-        // Мастер-громкость
         this.masterGainNode = this.audioCtx.createGain();
         this.masterGainNode.gain.value = 1.0;
         this.masterGainNode.connect(this.audioCtx.destination);
 
-        // Анализатор локального микрофона для визуализатора
         this.analyserNode = this.audioCtx.createAnalyser();
         this.analyserNode.fftSize = 64;
         this.analyserNode.smoothingTimeConstant = 0.5;
 
-        // Разблокировка Web Audio в Safari / iOS
         await this.unlockAudioContext();
-
         this.isInitialized = true;
     }
 
@@ -67,11 +64,10 @@ class AudioManager {
             await this.audioCtx.resume();
         }
 
-        // Проигрываем бесшумный буфер для снятия ограничений WebKit
         try {
-            const silentBuffer = this.audioCtx.createBuffer(1, 1, 22050);
+            const buffer = this.audioCtx.createBuffer(1, 1, 22050);
             const source = this.audioCtx.createBufferSource();
-            source.buffer = silentBuffer;
+            source.buffer = buffer;
             source.connect(this.audioCtx.destination);
             source.start(0);
         } catch (e) { }
@@ -90,8 +86,7 @@ class AudioManager {
                 echoCancellation: echoCancellation,
                 noiseSuppression: true,
                 autoGainControl: true,
-                channelCount: 1,
-                sampleRate: this.sampleRate
+                channelCount: 1
             },
             video: false
         };
@@ -99,33 +94,43 @@ class AudioManager {
         this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
         this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-        this.micGainNode = this.audioCtx.createGain();
-        this.micGainNode.gain.value = 1.0;
+        // Буфер захвата 2048 сэмплов для стабильной работы в WebKit
+        this.micProcessorNode = this.audioCtx.createScriptProcessor(2048, 1, 1);
 
-        // Захват PCM через ScriptProcessor (гарантирует синхронные 320 сэмплов)
-        this.micProcessorNode = this.audioCtx.createScriptProcessor(512, 1, 1);
-
-        let sampleAccumulator = [];
+        const inputSampleRate = this.audioCtx.sampleRate;
+        const resampleRatio = inputSampleRate / this.targetSampleRate;
+        let resampleBuffer = [];
 
         this.micProcessorNode.onaudioprocess = (e) => {
             if (this.isMuted) return;
 
             const inputData = e.inputBuffer.getChannelData(0);
-            for (let i = 0; i < inputData.length; i++) {
-                sampleAccumulator.push(inputData[i]);
+
+            // Линейный ресэмплинг из нативной частоты браузера (48к/44.1к) в 16кГц
+            let sourceIndex = 0;
+            while (sourceIndex < inputData.length) {
+                const i0 = Math.floor(sourceIndex);
+                const i1 = Math.min(i0 + 1, inputData.length - 1);
+                const frac = sourceIndex - i0;
+
+                const sample = inputData[i0] * (1 - frac) + inputData[i1] * frac;
+                resampleBuffer.push(sample);
+
+                sourceIndex += resampleRatio;
             }
 
-            while (sampleAccumulator.length >= this.samplesPerFrame) {
-                const chunk = sampleAccumulator.splice(0, this.samplesPerFrame);
+            // Нарезка строго по 320 сэмплов (20 мс)
+            while (resampleBuffer.length >= this.samplesPerFrame) {
+                const frame = resampleBuffer.splice(0, this.samplesPerFrame);
                 const pcm16Buffer = new ArrayBuffer(this.samplesPerFrame * 2);
                 const view = new DataView(pcm16Buffer);
 
                 for (let j = 0; j < this.samplesPerFrame; j++) {
-                    let s = chunk[j];
+                    let s = frame[j];
                     if (s > 1.0) s = 1.0;
                     if (s < -1.0) s = -1.0;
                     const int16 = s < 0 ? s * 32768 : s * 32767;
-                    view.setInt16(j * 2, int16, true);
+                    view.setInt16(j * 2, int16, true); // Little-Endian
                 }
 
                 if (this.onAudioFrame) {
@@ -134,11 +139,10 @@ class AudioManager {
             }
         };
 
-        this.micSourceNode.connect(this.micGainNode);
-        this.micGainNode.connect(this.analyserNode);
-        this.micGainNode.connect(this.micProcessorNode);
+        this.micSourceNode.connect(this.analyserNode);
+        this.micSourceNode.connect(this.micProcessorNode);
 
-        // Dummy connection для старта онаудиопроцесс в WebKit
+        // Необходимая заглушка для работы ScriptProcessor в Safari
         const dummyGain = this.audioCtx.createGain();
         dummyGain.gain.value = 0;
         this.micProcessorNode.connect(dummyGain);
@@ -153,10 +157,6 @@ class AudioManager {
         if (this.micProcessorNode) {
             this.micProcessorNode.disconnect();
             this.micProcessorNode = null;
-        }
-        if (this.micGainNode) {
-            this.micGainNode.disconnect();
-            this.micGainNode = null;
         }
         if (this.micSourceNode) {
             this.micSourceNode.disconnect();
@@ -219,12 +219,11 @@ class AudioManager {
     }
 
     /**
-     * Воспроизведение бинарного PCM-пакета с автопробуждением контекста
+     * Бесшовное воспроизведение входящих фреймов (без 50 Гц вибрации)
      */
     async playAudioPacket(arrayBuffer) {
         if (!this.audioCtx) return;
 
-        // Если Safari заблокировал контекст — будим его
         if (this.audioCtx.state === 'suspended') {
             try {
                 await this.audioCtx.resume();
@@ -249,22 +248,15 @@ class AudioManager {
         const sampleCount = Math.floor(pcmByteLength / 2);
         if (sampleCount === 0) return;
 
-        // PCM Int16 -> Float32
+        // Распаковка PCM Int16 -> Float32
         const float32Data = new Float32Array(sampleCount);
         for (let i = 0; i < sampleCount; i++) {
             const int16 = dataView.getInt16(pcmOffset + i * 2, true);
             float32Data[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        // Микро-сглаживание (16 сэмплов = 1 мс) для удаления клиппинга
-        const fadeSamples = Math.min(16, Math.floor(sampleCount / 4));
-        for (let i = 0; i < fadeSamples; i++) {
-            const ramp = i / fadeSamples;
-            float32Data[i] *= ramp;
-            float32Data[sampleCount - 1 - i] *= ramp;
-        }
-
-        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
+        // Web Audio API автоматически апсэмплит 16кГц в 48кГц звуковой карты
+        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.targetSampleRate);
         audioBuffer.getChannelData(0).set(float32Data);
 
         let participant = this.participants.get(senderId);
@@ -273,9 +265,9 @@ class AudioManager {
         }
 
         const now = this.audioCtx.currentTime;
-        const frameDuration = sampleCount / this.sampleRate;
+        const frameDuration = sampleCount / this.targetSampleRate;
 
-        // Коррекция таймлайна при дрейфе
+        // Бесшовная склейка без сброса таймлайна на каждом фрейме
         if (participant.nextPlayTime < now || (participant.nextPlayTime - now) > this.maxDriftSec) {
             participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
         }
@@ -301,7 +293,7 @@ class AudioManager {
             const tid = setTimeout(() => {
                 this.onSpeakingStateChange(userId, false);
                 this.speakingTimeouts.delete(userId);
-            }, 300);
+            }, 250);
 
             this.speakingTimeouts.set(userId, tid);
         }
@@ -325,5 +317,4 @@ class AudioManager {
     }
 }
 
-// Глобальный экземпляр аудио-менеджера
 window.audioManager = new AudioManager();
