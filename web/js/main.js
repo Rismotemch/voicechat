@@ -206,18 +206,17 @@ if (window.voiceChatApp) {
     async function startMicrophone() {
         await initAudioContext();
 
-        // Инициализируем RNNoise (если доступен)
-        if (window.neuralAudioProcessor && typeof window.neuralAudioProcessor.init === 'function') {
-            window.neuralAudioProcessor.init().catch(err => {
-                console.warn('RNNoise init failed:', err);
-            });
+        // Пытаемся инициализировать RNNoise
+        try {
+            await window.neuralAudioProcessor.init();
+        } catch (e) {
+            console.warn('RNNoise not available:', e);
         }
 
-        // Захватываем микрофон
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: state.echoCancellationEnabled,
-                noiseSuppression: true,
+                noiseSuppression: true, // Браузерное шумоподавление как fallback
                 autoGainControl: true,
                 channelCount: 1,
                 sampleRate: state.sampleRate
@@ -403,19 +402,32 @@ if (window.voiceChatApp) {
     }
 
     function stopMicrophone() {
+        // Останавливаем аудио-процессор
         if (state.audioProcessor) {
-            state.audioProcessor.disconnect();
-            state.audioProcessor.onaudioprocess = null;
+            try {
+                state.audioProcessor.disconnect();
+                state.audioProcessor.onaudioprocess = null;
+            } catch (e) {
+                console.warn('Error disconnecting audio processor:', e);
+            }
             state.audioProcessor = null;
         }
-        state.processingChain = [];
+
+        // Останавливаем все треки микрофона
         if (state.microphoneStream) {
-            state.microphoneStream.getTracks().forEach(track => {
-                track.stop();
-                track.enabled = false;
-            });
+            try {
+                state.microphoneStream.getTracks().forEach(track => {
+                    track.stop();
+                    track.enabled = false;
+                });
+            } catch (e) {
+                console.warn('Error stopping microphone tracks:', e);
+            }
             state.microphoneStream = null;
         }
+
+        // Очищаем цепочку обработки
+        state.processingChain = [];
     }
 
     // ---------- WebSocket ----------
