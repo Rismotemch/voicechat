@@ -206,16 +206,18 @@ if (window.voiceChatApp) {
     async function startMicrophone() {
         await initAudioContext();
 
-        // Инициализируем RNNoise (не блокируем, если не загрузится)
-        window.neuralAudioProcessor.init().catch(err => {
-            console.warn('RNNoise init failed:', err);
-        });
+        // Инициализируем RNNoise (если доступен)
+        if (window.neuralAudioProcessor && typeof window.neuralAudioProcessor.init === 'function') {
+            window.neuralAudioProcessor.init().catch(err => {
+                console.warn('RNNoise init failed:', err);
+            });
+        }
 
-        // Захватываем микрофон с встроенным шумоподавлением
+        // Захватываем микрофон
         state.microphoneStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 echoCancellation: state.echoCancellationEnabled,
-                noiseSuppression: true, // Встроенное шумоподавление (работает сразу)
+                noiseSuppression: true,
                 autoGainControl: true,
                 channelCount: 1,
                 sampleRate: state.sampleRate
@@ -260,7 +262,9 @@ if (window.voiceChatApp) {
             }
 
             // VAD
-            const hasVoice = window.neuralAudioProcessor.detectVoice(audioData);
+            const hasVoice = window.neuralAudioProcessor
+                ? window.neuralAudioProcessor.detectVoice(audioData)
+                : true;
 
             if (!hasVoice) {
                 if (state.ws && state.ws.readyState === WebSocket.OPEN) {
