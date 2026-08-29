@@ -507,6 +507,11 @@ if (window.voiceChatApp) {
             selectedRoomId = payload.room.id;
             selectedRoomName = payload.room.name;
 
+            const currentRoomLabel = document.getElementById('currentRoomLabel');
+            if (currentRoomLabel) {
+                currentRoomLabel.textContent = `Комната: ${payload.room.name}`;
+            }
+
             if (state.ws && state.ws.readyState === WebSocket.OPEN) {
                 sendJSONMessage('get_rooms', {});
             }
