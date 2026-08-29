@@ -290,8 +290,18 @@ func (c *Client) handleJoin(msg JoinMessage) {
 }
 
 func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
-	roomID := "room_" + uuid.New().String()[:8]
+	// Проверяем уникальность имени
+	c.Hub.mu.RLock()
+	for _, room := range c.Hub.rooms {
+		if room.Name == msg.RoomName {
+			c.Hub.mu.RUnlock()
+			c.sendError("Комната с таким названием уже существует")
+			return
+		}
+	}
+	c.Hub.mu.RUnlock()
 
+	roomID := "room_" + uuid.New().String()[:8]
 	room := models.NewRoom(msg.RoomName, msg.MaxUsers)
 	room.ID = roomID
 	room.Password = msg.Password
@@ -342,13 +352,25 @@ func (c *Client) handleAudioData(audioData []byte) {
 		return
 	}
 
+	// Формируем заголовок: [тип=2][4 байта длина ID][ID отправителя][аудио данные]
+	senderID := c.User.ID
+	senderIDBytes := []byte(senderID)
+	header := make([]byte, 5+len(senderIDBytes))
+	header[0] = 2 // тип: аудио с идентификатором отправителя
+	header[1] = byte(len(senderIDBytes) >> 24)
+	header[2] = byte(len(senderIDBytes) >> 16)
+	header[3] = byte(len(senderIDBytes) >> 8)
+	header[4] = byte(len(senderIDBytes))
+	copy(header[5:], senderIDBytes)
+
+	fullData := append(header, audioData...)
+
 	for _, client := range c.Hub.getClientsInRoom(c.Room.ID) {
 		if client.ID == c.ID {
 			continue
 		}
-
 		select {
-		case client.Send <- audioData:
+		case client.Send <- fullData:
 		default:
 		}
 	}

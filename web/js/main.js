@@ -25,7 +25,7 @@ if (window.voiceChatApp) {
         noiseSuppressionEnabled: true,
         echoCancellationEnabled: true,
         pendingRoomId: null,
-        pendingRoomPassword: null,
+        pendingRoomName: null,
     };
 
     // ---------- DOM элементы ----------
@@ -57,14 +57,13 @@ if (window.voiceChatApp) {
 
     let selectedRoomId = 'main';
     let selectedRoomName = 'main';
-    let currentRoomPassword = null; // пароль текущей выбранной комнаты (если есть)
+    let currentRoomPassword = null;
 
     // ---------- Инициализация ----------
     document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         setupSettingsListeners();
         loadUser();
-        // Показываем экран выбора комнаты, если пользователь не в комнате
         showRoomSelection();
     });
 
@@ -107,16 +106,12 @@ if (window.voiceChatApp) {
             });
         }
 
+        // Значения будут применены при сохранении настроек
         if (noiseSuppression) {
-            noiseSuppression.addEventListener('change', (e) => {
-                state.noiseSuppressionEnabled = e.target.checked;
-            });
+            noiseSuppression.addEventListener('change', () => { });
         }
-
         if (echoCancellation) {
-            echoCancellation.addEventListener('change', (e) => {
-                state.echoCancellationEnabled = e.target.checked;
-            });
+            echoCancellation.addEventListener('change', () => { });
         }
     }
 
@@ -127,7 +122,6 @@ if (window.voiceChatApp) {
             if (name && name.trim()) {
                 localStorage.setItem('voicechat_username', name.trim());
             } else {
-                // Если пользователь отказался, задаём имя по умолчанию
                 name = 'Гость ' + Math.floor(Math.random() * 1000);
                 localStorage.setItem('voicechat_username', name);
             }
@@ -142,7 +136,7 @@ if (window.voiceChatApp) {
         }
     }
 
-    // ---------- Аудио функции ----------
+    // ---------- Аудио ----------
     async function initAudioContext() {
         if (!state.audioContext) {
             state.audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -272,35 +266,50 @@ if (window.voiceChatApp) {
         return pcm16.buffer;
     }
 
+    function processPCMData(userId, pcmData) {
+        if (!state.audioContext) return;
+        const int16Array = new Int16Array(pcmData.buffer);
+        const float32Array = new Float32Array(int16Array.length);
+        for (let i = 0; i < int16Array.length; i++) {
+            float32Array[i] = int16Array[i] / 32768.0;
+        }
+        const rms = Math.sqrt(float32Array.reduce((sum, val) => sum + val * val, 0) / float32Array.length);
+        if (rms > state.speakingThreshold) {
+            state.speakingUsers.add(userId);
+            updateSpeakingIndicator(userId, true);
+        } else {
+            state.speakingUsers.delete(userId);
+            updateSpeakingIndicator(userId, false);
+        }
+        const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
+        const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, state.sampleRate);
+        audioBuffer.getChannelData(0).set(float32Array);
+        const source = state.audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        const gainNode = state.audioContext.createGain();
+        gainNode.gain.value = volume;
+        source.connect(gainNode);
+        gainNode.connect(state.audioContext.destination);
+        source.start();
+    }
+
     function playRemoteAudio(userId, data) {
         if (!state.audioContext) return;
         const dataArray = new Uint8Array(data);
-        if (dataArray[0] === 0) {
-            state.speakingUsers.delete(userId);
-            updateSpeakingIndicator(userId, false);
-            return;
-        }
-        if (dataArray[0] === 1) {
+        if (dataArray[0] === 1) { // старый формат без ID
             const length = (dataArray[1] << 8) | dataArray[2];
             const pcmData = dataArray.slice(3, 3 + length);
-            const int16Array = new Int16Array(pcmData.buffer);
-            const float32Array = new Float32Array(int16Array.length);
-            for (let i = 0; i < int16Array.length; i++) float32Array[i] = int16Array[i] / 32768.0;
-            const rms = Math.sqrt(float32Array.reduce((sum, val) => sum + val * val, 0) / float32Array.length);
-            if (rms > state.speakingThreshold) {
-                state.speakingUsers.add(userId);
-                updateSpeakingIndicator(userId, true);
-            }
-            const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
-            const audioBuffer = state.audioContext.createBuffer(1, float32Array.length, state.sampleRate);
-            audioBuffer.getChannelData(0).set(float32Array);
-            const source = state.audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            const gainNode = state.audioContext.createGain();
-            gainNode.gain.value = volume;
-            source.connect(gainNode);
-            gainNode.connect(state.audioContext.destination);
-            source.start();
+            processPCMData(userId || 'remote', pcmData);
+            return;
+        }
+        if (dataArray[0] === 2) { // новый формат с ID отправителя
+            if (dataArray.length < 5) return;
+            const idLength = (dataArray[1] << 24) | (dataArray[2] << 16) | (dataArray[3] << 8) | dataArray[4];
+            if (dataArray.length < 5 + idLength) return;
+            const senderID = new TextDecoder().decode(dataArray.slice(5, 5 + idLength));
+            const pcmData = dataArray.slice(5 + idLength);
+            processPCMData(senderID, pcmData);
+            return;
         }
     }
 
@@ -334,28 +343,21 @@ if (window.voiceChatApp) {
             const wsUrl = `${protocol}//${window.location.host}/ws`;
             state.ws = new WebSocket(wsUrl);
             state.ws.binaryType = 'arraybuffer';
-
             state.ws.onopen = () => {
                 console.log('WebSocket connected');
                 resolve();
             };
-
             state.ws.onmessage = (event) => {
                 if (typeof event.data === 'string') handleJSONMessage(event.data);
-                else if (event.data instanceof ArrayBuffer) playRemoteAudio('remote', event.data);
+                else if (event.data instanceof ArrayBuffer) playRemoteAudio(null, event.data);
             };
-
             state.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 reject(error);
             };
-
             state.ws.onclose = () => {
                 console.log('WebSocket disconnected');
-                if (state.isJoined) {
-                    // Если соединение потеряно, выходим из комнаты
-                    leaveRoom();
-                }
+                if (state.isJoined) leaveRoom();
                 state.ws = null;
             };
         });
@@ -392,7 +394,6 @@ if (window.voiceChatApp) {
                 case 'error':
                     console.error('Server error:', message.payload.message);
                     alert('Ошибка: ' + message.payload.message);
-                    // Возвращаемся на экран выбора комнаты
                     showRoomSelection();
                     break;
             }
@@ -403,23 +404,18 @@ if (window.voiceChatApp) {
 
     function handleRoomState(payload) {
         if (payload.users) {
-            // Очищаем старых участников
             state.participants.clear();
             document.querySelectorAll('.participant-card').forEach(c => c.remove());
             payload.users.forEach(user => {
-                if (state.user && user.id !== state.user.id) {
-                    addParticipantToUI(user, false);
-                } else if (state.user && user.id === state.user.id) {
-                    addParticipantToUI(user, true);
-                }
+                if (state.user && user.id === state.user.id) addParticipantToUI(user, true);
+                else addParticipantToUI(user, false);
             });
-            // После получения room_state включаем микрофон
             startMicrophone().catch(err => console.error('Mic start failed:', err));
             state.isJoined = true;
-            // Показываем сетку участников
             elements.connectionPanel.style.display = 'none';
             elements.participantsGrid.style.display = 'grid';
             elements.footerControls.style.display = 'flex';
+            updateRoomLabel();
         }
     }
 
@@ -441,10 +437,9 @@ if (window.voiceChatApp) {
         if (payload.room) {
             selectedRoomId = payload.room.id;
             selectedRoomName = payload.room.name;
-            currentRoomPassword = null; // сбросим пароль для новой комнаты
+            currentRoomPassword = payload.room.password || null;
             updateRoomLabel();
             refreshRoomsList();
-            // Автоматически выбираем созданную комнату и показываем панель подключения
             selectRoom(selectedRoomId, selectedRoomName);
         }
     }
@@ -484,29 +479,26 @@ if (window.voiceChatApp) {
 
     // ---------- UI действия ----------
     function showRoomSelection() {
-        // Закрываем модальные окна
         elements.createRoomModal.style.display = 'none';
         elements.passwordModal.style.display = 'none';
-        // Останавливаем микрофон, если он работает
         stopMicrophone();
-        // Сбрасываем состояние комнаты
         state.isJoined = false;
         state.participants.clear();
         document.querySelectorAll('.participant-card').forEach(c => c.remove());
-        // Показываем экран выбора комнаты
         elements.roomSelectionPanel.style.display = 'block';
         elements.connectionPanel.style.display = 'none';
         elements.participantsGrid.style.display = 'none';
         elements.footerControls.style.display = 'none';
+        selectedRoomId = 'main';
+        selectedRoomName = 'main';
+        currentRoomPassword = null;
         updateRoomLabel();
-        // Обновляем список комнат
         refreshRoomsList();
     }
 
     function selectRoom(roomId, roomName) {
         selectedRoomId = roomId;
         selectedRoomName = roomName;
-        currentRoomPassword = null;
         updateRoomLabel();
         elements.roomSelectionPanel.style.display = 'none';
         elements.connectionPanel.style.display = 'block';
@@ -519,27 +511,18 @@ if (window.voiceChatApp) {
         if (elements.currentRoomLabel) {
             elements.currentRoomLabel.textContent = state.isJoined
                 ? `Комната: ${selectedRoomName}`
-                : (selectedRoomName && selectedRoomName !== 'main' ? `Комната: ${selectedRoomName}` : 'Выберите комнату');
+                : (selectedRoomName !== 'main' ? `Комната: ${selectedRoomName}` : 'Выберите комнату');
         }
     }
 
     async function joinRoom() {
-        if (!state.user) {
-            loadUser();
-        }
-        if (!state.user || !state.user.name) {
-            alert('Не удалось определить имя пользователя');
-            return;
-        }
-        // Подключаемся к WebSocket, если ещё не подключены
+        if (!state.user) loadUser();
         try {
             await connectWebSocket();
         } catch (e) {
-            console.error('WebSocket connection failed:', e);
             alert('Не удалось подключиться к серверу');
             return;
         }
-        // Отправляем join
         const joinPayload = {
             userId: state.user.id,
             userName: state.user.name,
@@ -548,22 +531,16 @@ if (window.voiceChatApp) {
         };
         if (currentRoomPassword) joinPayload.password = currentRoomPassword;
         sendJSONMessage('join', joinPayload);
-        // Не переключаем экран здесь, ждём room_state
     }
 
     function leaveRoom() {
-        // Закрываем WebSocket? Нет, оставляем для списка комнат, но можно и закрыть.
-        // Лучше оставить открытым, чтобы не пересоздавать.
         stopMicrophone();
         state.isJoined = false;
         state.participants.clear();
         document.querySelectorAll('.participant-card').forEach(c => c.remove());
         elements.participantsGrid.style.display = 'none';
         elements.footerControls.style.display = 'none';
-        elements.roomSelectionPanel.style.display = 'block';
-        elements.connectionPanel.style.display = 'none';
-        updateRoomLabel();
-        refreshRoomsList();
+        showRoomSelection();
     }
 
     function toggleMute() {
@@ -581,6 +558,7 @@ if (window.voiceChatApp) {
     }
 
     function saveSettings() {
+        // Сохраняем имя
         if (elements.settingsUserName) {
             const newName = elements.settingsUserName.value.trim();
             if (newName) {
@@ -588,7 +566,17 @@ if (window.voiceChatApp) {
                 if (state.user) state.user.name = newName;
             }
         }
+        // Применяем настройки, даже если пользователь не в комнате
+        const noiseSuppression = document.getElementById('noiseSuppression');
+        const echoCancellation = document.getElementById('echoCancellation');
+        if (noiseSuppression) state.noiseSuppressionEnabled = noiseSuppression.checked;
+        if (echoCancellation) state.echoCancellationEnabled = echoCancellation.checked;
         elements.settingsModal.style.display = 'none';
+        // Если пользователь в комнате, перезапускаем микрофон
+        if (state.isJoined) {
+            stopMicrophone();
+            startMicrophone().catch(err => console.error('Mic restart failed:', err));
+        }
     }
 
     function openCreateRoomModal() {
