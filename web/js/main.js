@@ -1,4 +1,3 @@
-// Глобальное состояние
 if (window.voiceChatApp) {
     console.warn('VoiceChat app already loaded');
 } else {
@@ -26,11 +25,15 @@ if (window.voiceChatApp) {
         echoCancellationEnabled: true
     };
 
+    let selectedRoomId = 'main';
+    let selectedRoomName = 'main';
+    let currentRoomPassword = null;
+    let pendingRoomId = null;
+
     const elements = {
         connectionPanel: document.getElementById('connectionPanel'),
         participantsGrid: document.getElementById('participantsGrid'),
         joinBtn: document.getElementById('joinBtn'),
-        userName: document.getElementById('userName'),
         micBtn: document.getElementById('micBtn'),
         leaveBtn: document.getElementById('leaveBtn'),
         settingsBtn: document.getElementById('settingsBtn'),
@@ -41,22 +44,17 @@ if (window.voiceChatApp) {
     const roomElements = {
         roomSelectionPanel: document.getElementById('roomSelectionPanel'),
         roomsList: document.getElementById('roomsList'),
-        newRoomName: document.getElementById('newRoomName'),
         createRoomBtn: document.getElementById('createRoomBtn'),
+        refreshRoomsBtn: document.getElementById('refreshRoomsBtn'),
         selectedRoomInfo: document.getElementById('selectedRoomInfo'),
         backToRoomsBtn: document.getElementById('backToRoomsBtn'),
         footerControls: document.getElementById('footerControls')
     };
 
-    let selectedRoomId = 'main';
-    let selectedRoomName = 'main';
-    let currentRoomPassword = null;
-    let pendingRoomId = null;
-
     document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         setupSettingsListeners();
-        loadUserFromStorage();
+        checkUserExists();
     });
 
     function setupEventListeners() {
@@ -64,39 +62,27 @@ if (window.voiceChatApp) {
         if (elements.micBtn) elements.micBtn.addEventListener('click', toggleMute);
         if (elements.leaveBtn) elements.leaveBtn.addEventListener('click', leaveRoom);
         if (elements.settingsBtn) elements.settingsBtn.addEventListener('click', openSettings);
-        if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', closeSettings);
-        if (elements.userName) elements.userName.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') joinRoom();
-        });
-        const createRoomBtn = document.getElementById('createRoomBtn');
-        const confirmCreateRoomBtn = document.getElementById('confirmCreateRoomBtn');
-        const cancelCreateRoomBtn = document.getElementById('cancelCreateRoomBtn');
-        const confirmPasswordBtn = document.getElementById('confirmPasswordBtn');
-        const cancelPasswordBtn = document.getElementById('cancelPasswordBtn');
-
-        if (createRoomBtn) createRoomBtn.addEventListener('click', openCreateRoomModal);
-        if (confirmCreateRoomBtn) confirmCreateRoomBtn.addEventListener('click', confirmCreateRoom);
-        if (cancelCreateRoomBtn) cancelCreateRoomBtn.addEventListener('click', closeCreateRoomModal);
-        if (confirmPasswordBtn) confirmPasswordBtn.addEventListener('click', confirmPassword);
-        if (cancelPasswordBtn) cancelPasswordBtn.addEventListener('click', closePasswordModal);
+        if (elements.closeSettingsBtn) elements.closeSettingsBtn.addEventListener('click', saveSettings);
 
         if (roomElements.createRoomBtn) {
-            roomElements.createRoomBtn.addEventListener('click', createRoom);
+            roomElements.createRoomBtn.addEventListener('click', openCreateRoomModal);
+        }
+        if (roomElements.refreshRoomsBtn) {
+            roomElements.refreshRoomsBtn.addEventListener('click', refreshRoomsList);
         }
         if (roomElements.backToRoomsBtn) {
             roomElements.backToRoomsBtn.addEventListener('click', showRoomSelection);
         }
 
-        // Внутри setupEventListeners() добавьте:
-        const refreshRoomsBtn = document.getElementById('refreshRoomsBtn');
-        if (refreshRoomsBtn) {
-            refreshRoomsBtn.addEventListener('click', () => {
-                if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-                    connectWebSocket();
-                }
-                sendJSONMessage('get_rooms', {});
-            });
-        }
+        const confirmCreateRoomBtn = document.getElementById('confirmCreateRoomBtn');
+        const cancelCreateRoomBtn = document.getElementById('cancelCreateRoomBtn');
+        const confirmPasswordBtn = document.getElementById('confirmPasswordBtn');
+        const cancelPasswordBtn = document.getElementById('cancelPasswordBtn');
+
+        if (confirmCreateRoomBtn) confirmCreateRoomBtn.addEventListener('click', confirmCreateRoom);
+        if (cancelCreateRoomBtn) cancelCreateRoomBtn.addEventListener('click', closeCreateRoomModal);
+        if (confirmPasswordBtn) confirmPasswordBtn.addEventListener('click', confirmPassword);
+        if (cancelPasswordBtn) cancelPasswordBtn.addEventListener('click', closePasswordModal);
     }
 
     function setupSettingsListeners() {
@@ -126,27 +112,32 @@ if (window.voiceChatApp) {
         if (noiseSuppression) {
             noiseSuppression.addEventListener('change', (e) => {
                 state.noiseSuppressionEnabled = e.target.checked;
-                if (state.isJoined) {
-                    stopMicrophone();
-                    startMicrophone();
-                }
             });
         }
 
         if (echoCancellation) {
             echoCancellation.addEventListener('change', (e) => {
                 state.echoCancellationEnabled = e.target.checked;
-                if (state.isJoined) {
-                    stopMicrophone();
-                    startMicrophone();
-                }
             });
         }
     }
 
-    function loadUserFromStorage() {
+    function checkUserExists() {
         const savedName = localStorage.getItem('voicechat_username');
-        if (savedName && elements.userName) elements.userName.value = savedName;
+        const settingsUserName = document.getElementById('settingsUserName');
+
+        if (savedName && settingsUserName) {
+            settingsUserName.value = savedName;
+        }
+
+        // Если имя не сохранено, показываем модальное окно
+        if (!savedName) {
+            const userName = prompt('Введите ваше имя для входа:');
+            if (userName && userName.trim()) {
+                localStorage.setItem('voicechat_username', userName.trim());
+                if (settingsUserName) settingsUserName.value = userName.trim();
+            }
+        }
     }
 
     async function initAudioContext() {
@@ -156,7 +147,6 @@ if (window.voiceChatApp) {
                 latencyHint: 'interactive'
             });
         }
-
         if (state.audioContext.state === 'suspended') {
             await state.audioContext.resume();
         }
@@ -166,22 +156,14 @@ if (window.voiceChatApp) {
         if (!state.audioContext) {
             await initAudioContext();
         }
-
         state.processingChain = [];
-
-        const eq = createEqualizer();
-        state.processingChain.push(...eq);
-
-        const compressor = createCompressor();
-        state.processingChain.push(compressor);
-
-        const noiseGate = createNoiseGate();
-        state.processingChain.push(noiseGate);
+        state.processingChain.push(...createEqualizer());
+        state.processingChain.push(createCompressor());
+        state.processingChain.push(createNoiseGate());
     }
 
     function createEqualizer() {
         const filters = [];
-
         const highpass = state.audioContext.createBiquadFilter();
         highpass.type = 'highpass';
         highpass.frequency.value = 100;
@@ -250,8 +232,8 @@ if (window.voiceChatApp) {
         });
 
         const source = state.audioContext.createMediaStreamSource(state.microphoneStream);
-
         let currentNode = source;
+
         for (const processor of state.processingChain) {
             currentNode.connect(processor);
             currentNode = processor;
@@ -268,7 +250,6 @@ if (window.voiceChatApp) {
             if (!state.isJoined || state.isMuted) return;
 
             const audioData = event.inputBuffer.getChannelData(0);
-
             const dataArray = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteTimeDomainData(dataArray);
 
@@ -285,7 +266,6 @@ if (window.voiceChatApp) {
                 }
             } else {
                 const pcmData = floatToPCM16Optimized(audioData);
-
                 const header = new Uint8Array(3);
                 header[0] = 1;
                 header[1] = (pcmData.byteLength >> 8) & 0xFF;
@@ -383,38 +363,49 @@ if (window.voiceChatApp) {
     }
 
     async function joinRoom() {
-        const userName = elements.userName.value.trim();
-        if (!userName) {
-            alert('Пожалуйста, введите имя');
+        const savedName = localStorage.getItem('voicechat_username');
+
+        if (!savedName || !savedName.trim()) {
+            alert('Пожалуйста, введите ваше имя в настройках');
+            openSettings();
             return;
         }
 
-        localStorage.setItem('voicechat_username', userName);
+        state.user = {
+            id: 'user_' + Math.random().toString(36).substring(2, 11),
+            name: savedName,
+            avatarColor: generateRandomColor()
+        };
 
         try {
-            // Создаём пользователя до всех операций
-            state.user = {
-                id: 'user_' + Math.random().toString(36).substring(2, 11),
-                name: userName,
-                avatarColor: generateRandomColor()
-            };
-
             await startMicrophone();
             await connectWebSocket();
+
+            const joinPayload = {
+                userId: state.user.id,
+                userName: state.user.name,
+                avatarColor: state.user.avatarColor,
+                roomId: selectedRoomId || 'main'
+            };
+
+            if (currentRoomPassword) {
+                joinPayload.password = currentRoomPassword;
+            }
+
+            sendJSONMessage('join', joinPayload);
 
             elements.connectionPanel.style.display = 'none';
             elements.participantsGrid.style.display = 'grid';
             if (roomElements.footerControls) {
                 roomElements.footerControls.style.display = 'flex';
             }
-            addParticipantToUI(state.user, true);
 
+            addParticipantToUI(state.user, true);
             state.isJoined = true;
-            console.log('Joined room as', userName);
 
         } catch (error) {
             console.error('Failed to join room:', error);
-            alert('Не удалось подключиться: ' + error.message);
+            alert('Ошибка: ' + error.message);
         }
     }
 
@@ -428,15 +419,6 @@ if (window.voiceChatApp) {
 
             state.ws.onopen = () => {
                 console.log('WebSocket connected');
-
-                if (state.user && state.user.id) {
-                    sendJSONMessage('join', {
-                        userId: state.user.id,
-                        userName: state.user.name,
-                        avatarColor: state.user.avatarColor,
-                        roomId: selectedRoomId || 'main'
-                    });
-                }
                 resolve();
             };
 
@@ -484,6 +466,7 @@ if (window.voiceChatApp) {
                     break;
                 case 'error':
                     console.error('Server error:', message.payload.message);
+                    alert('Ошибка: ' + message.payload.message);
                     break;
             }
         } catch (error) {
@@ -525,9 +508,7 @@ if (window.voiceChatApp) {
                 currentRoomLabel.textContent = `Комната: ${payload.room.name}`;
             }
 
-            if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-                sendJSONMessage('get_rooms', {});
-            }
+            refreshRoomsList();
         }
     }
 
@@ -540,20 +521,34 @@ if (window.voiceChatApp) {
             const roomCard = document.createElement('div');
             roomCard.className = 'room-card';
 
+            const roomInfo = document.createElement('div');
+            roomInfo.className = 'room-card-info';
+
             const roomName = document.createElement('div');
-            roomName.className = 'room-name';
+            roomName.className = 'room-card-name';
             roomName.textContent = room.name;
 
             const userCount = document.createElement('div');
-            userCount.className = 'room-users';
+            userCount.className = 'room-card-users';
             const count = room.users ? Object.keys(room.users).length : 0;
             userCount.textContent = `👥 ${count} участников`;
 
-            roomCard.appendChild(roomName);
-            roomCard.appendChild(userCount);
+            roomInfo.appendChild(roomName);
+            roomInfo.appendChild(userCount);
+
+            const lockIcon = document.createElement('span');
+            lockIcon.className = 'room-card-lock';
+            lockIcon.textContent = room.password ? '🔒' : '';
+
+            roomCard.appendChild(roomInfo);
+            roomCard.appendChild(lockIcon);
 
             roomCard.addEventListener('click', () => {
-                selectRoom(room.id, room.name);
+                if (room.password) {
+                    openPasswordModal(room.id);
+                } else {
+                    selectRoom(room.id, room.name);
+                }
             });
 
             roomElements.roomsList.appendChild(roomCard);
@@ -562,12 +557,12 @@ if (window.voiceChatApp) {
 
     function selectRoom(roomId, roomName) {
         selectedRoomId = roomId;
-        selectedRoomName = roomName;
+        selectedRoomName = roomName || roomId;
+        currentRoomPassword = null;
 
-        // Обновляем метку в шапке
         const currentRoomLabel = document.getElementById('currentRoomLabel');
         if (currentRoomLabel) {
-            currentRoomLabel.textContent = `Комната: ${roomName}`;
+            currentRoomLabel.textContent = `Комната: ${selectedRoomName}`;
         }
 
         if (roomElements.roomSelectionPanel) {
@@ -578,7 +573,7 @@ if (window.voiceChatApp) {
         }
 
         if (roomElements.selectedRoomInfo) {
-            roomElements.selectedRoomInfo.innerHTML = `<strong>Комната:</strong> ${roomName}`;
+            roomElements.selectedRoomInfo.innerHTML = `<strong>Комната:</strong> ${selectedRoomName}<br><small>Нажмите "Присоединиться"</small>`;
         }
     }
 
@@ -594,30 +589,93 @@ if (window.voiceChatApp) {
         state.user = null;
         state.participants.clear();
 
+        const currentRoomLabel = document.getElementById('currentRoomLabel');
+        if (currentRoomLabel) {
+            currentRoomLabel.textContent = 'Выберите комнату';
+        }
+
         if (elements.connectionPanel) elements.connectionPanel.style.display = 'none';
         if (elements.participantsGrid) elements.participantsGrid.style.display = 'none';
         if (elements.participantsGrid) elements.participantsGrid.innerHTML = '';
         if (roomElements.footerControls) roomElements.footerControls.style.display = 'none';
         if (roomElements.roomSelectionPanel) roomElements.roomSelectionPanel.style.display = 'block';
+
+        refreshRoomsList();
     }
 
-    async function createRoom() {
-        const roomName = roomElements.newRoomName.value.trim();
+    async function refreshRoomsList() {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            await connectWebSocket();
+        }
+        sendJSONMessage('get_rooms', {});
+    }
+
+    function openCreateRoomModal() {
+        document.getElementById('createRoomModal').style.display = 'flex';
+    }
+
+    function closeCreateRoomModal() {
+        document.getElementById('createRoomModal').style.display = 'none';
+    }
+
+    function confirmCreateRoom() {
+        const roomName = document.getElementById('roomNameInput').value.trim();
+        const password = document.getElementById('roomPasswordInput').value;
+        const maxUsers = parseInt(document.getElementById('roomMaxUsersInput').value) || 25;
+        const catInBagMode = document.getElementById('catInBagMode').checked;
+        const spatialAudioMode = document.getElementById('spatialAudioMode').checked;
+        const highQualityMode = document.getElementById('highQualityMode').checked;
+
         if (!roomName) {
             alert('Введите название комнаты');
             return;
         }
 
-        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-            await connectWebSocket();
+        const payload = {
+            roomName: roomName,
+            maxUsers: maxUsers,
+            catInBagMode: catInBagMode,
+            spatialAudioMode: spatialAudioMode,
+            highQualityMode: highQualityMode
+        };
+
+        if (password) {
+            payload.password = password;
         }
 
-        sendJSONMessage('create_room', {
-            roomName: roomName,
-            maxUsers: 25
-        });
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+            connectWebSocket().then(() => {
+                sendJSONMessage('create_room', payload);
+            });
+        } else {
+            sendJSONMessage('create_room', payload);
+        }
 
-        roomElements.newRoomName.value = '';
+        closeCreateRoomModal();
+        document.getElementById('roomNameInput').value = '';
+        document.getElementById('roomPasswordInput').value = '';
+    }
+
+    function openPasswordModal(roomId) {
+        pendingRoomId = roomId;
+        document.getElementById('passwordModal').style.display = 'flex';
+    }
+
+    function closePasswordModal() {
+        pendingRoomId = null;
+        document.getElementById('passwordModal').style.display = 'none';
+    }
+
+    function confirmPassword() {
+        const password = document.getElementById('roomPasswordCheckInput').value;
+
+        if (pendingRoomId) {
+            currentRoomPassword = password;
+            selectRoom(pendingRoomId, pendingRoomId);
+        }
+
+        closePasswordModal();
+        document.getElementById('roomPasswordCheckInput').value = '';
     }
 
     function sendJSONMessage(type, payload) {
@@ -627,8 +685,6 @@ if (window.voiceChatApp) {
     }
 
     function leaveRoom() {
-        console.log('Leaving room');
-
         if (state.ws) {
             state.ws.close();
             state.ws = null;
@@ -640,10 +696,17 @@ if (window.voiceChatApp) {
         state.isJoined = false;
         state.user = null;
 
+        const currentRoomLabel = document.getElementById('currentRoomLabel');
+        if (currentRoomLabel) {
+            currentRoomLabel.textContent = 'Выберите комнату';
+        }
+
         if (elements.connectionPanel) elements.connectionPanel.style.display = 'block';
         if (elements.participantsGrid) elements.participantsGrid.style.display = 'none';
         if (elements.participantsGrid) elements.participantsGrid.innerHTML = '';
         if (roomElements.footerControls) roomElements.footerControls.style.display = 'none';
+
+        showRoomSelection();
     }
 
     function toggleMute() {
@@ -661,12 +724,26 @@ if (window.voiceChatApp) {
     }
 
     function openSettings() {
+        const settingsUserName = document.getElementById('settingsUserName');
+        const savedName = localStorage.getItem('voicechat_username');
+        if (settingsUserName && savedName) {
+            settingsUserName.value = savedName;
+        }
+
         if (elements.settingsModal) {
             elements.settingsModal.style.display = 'flex';
         }
     }
 
-    function closeSettings() {
+    function saveSettings() {
+        const settingsUserName = document.getElementById('settingsUserName');
+        if (settingsUserName) {
+            const newName = settingsUserName.value.trim();
+            if (newName) {
+                localStorage.setItem('voicechat_username', newName);
+            }
+        }
+
         if (elements.settingsModal) {
             elements.settingsModal.style.display = 'none';
         }
@@ -712,94 +789,5 @@ if (window.voiceChatApp) {
     function generateRandomColor() {
         const colors = ['#7c6cff', '#ff6b6b', '#51cf66', '#ffd43b', '#4dabf7', '#ff922b'];
         return colors[Math.floor(Math.random() * colors.length)];
-    }
-}
-function openCreateRoomModal() {
-    document.getElementById('createRoomModal').style.display = 'flex';
-}
-
-function closeCreateRoomModal() {
-    document.getElementById('createRoomModal').style.display = 'none';
-}
-
-function confirmCreateRoom() {
-    const roomName = document.getElementById('roomNameInput').value.trim();
-    const password = document.getElementById('roomPasswordInput').value;
-    const maxUsers = parseInt(document.getElementById('roomMaxUsersInput').value) || 25;
-    const catInBagMode = document.getElementById('catInBagMode').checked;
-    const spatialAudioMode = document.getElementById('spatialAudioMode').checked;
-    const highQualityMode = document.getElementById('highQualityMode').checked;
-
-    if (!roomName) {
-        alert('Введите название комнаты');
-        return;
-    }
-
-    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-        connectWebSocket().then(() => {
-            sendJSONMessage('create_room', {
-                roomName: roomName,
-                password: password || undefined,
-                maxUsers: maxUsers,
-                catInBagMode: catInBagMode,
-                spatialAudioMode: spatialAudioMode,
-                highQualityMode: highQualityMode
-            });
-        });
-    } else {
-        sendJSONMessage('create_room', {
-            roomName: roomName,
-            password: password || undefined,
-            maxUsers: maxUsers,
-            catInBagMode: catInBagMode,
-            spatialAudioMode: spatialAudioMode,
-            highQualityMode: highQualityMode
-        });
-    }
-
-    closeCreateRoomModal();
-    document.getElementById('roomNameInput').value = '';
-    document.getElementById('roomPasswordInput').value = '';
-}
-
-function openPasswordModal(roomId) {
-    pendingRoomId = roomId;
-    document.getElementById('passwordModal').style.display = 'flex';
-}
-
-function closePasswordModal() {
-    pendingRoomId = null;
-    document.getElementById('passwordModal').style.display = 'none';
-}
-
-function confirmPassword() {
-    const password = document.getElementById('roomPasswordCheckInput').value;
-
-    if (pendingRoomId) {
-        selectRoom(pendingRoomId, null, password);
-    }
-
-    closePasswordModal();
-    document.getElementById('roomPasswordCheckInput').value = '';
-}
-
-function selectRoom(roomId, roomName, password) {
-    selectedRoomId = roomId;
-    selectedRoomName = roomName || roomId;
-    currentRoomPassword = password || null;
-
-    // Обновляем метку
-    const currentRoomLabel = document.getElementById('currentRoomLabel');
-    if (currentRoomLabel) {
-        currentRoomLabel.textContent = `Комната: ${selectedRoomName}`;
-    }
-
-    // Показываем панель подключения
-    document.getElementById('roomSelectionPanel').style.display = 'none';
-    document.getElementById('connectionPanel').style.display = 'block';
-
-    const selectedRoomInfo = document.getElementById('selectedRoomInfo');
-    if (selectedRoomInfo) {
-        selectedRoomInfo.innerHTML = `<strong>Комната:</strong> ${selectedRoomName}<br><small>Нажмите "Присоединиться"</small>`;
     }
 }
