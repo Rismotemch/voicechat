@@ -1,28 +1,43 @@
 {
-    "name": "Voice Chat",
+    "id": "/",
+    "name": "VoiceChat — Голосовой чат",
     "short_name": "VoiceChat",
-    "description": "Голосовой чат для общения с друзьями",
+    "description": "Быстрый серверный голосовой чат без задержек и нагрузки на процессор",
     "start_url": "/",
+    "scope": "/",
     "display": "standalone",
-    "background_color": "#121212",
-    "theme_color": "#121212",
+    "background_color": "#0a0a0f",
+    "theme_color": "#0a0a0f",
     "orientation": "portrait-primary",
     "categories": [
         "social",
-        "communication"
+        "communication",
+        "utilities"
     ],
     "icons": [
         {
             "src": "/icons/icon-192.png",
             "sizes": "192x192",
             "type": "image/png",
-            "purpose": "any maskable"
+            "purpose": "any"
+        },
+        {
+            "src": "/icons/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable"
         },
         {
             "src": "/icons/icon-512.png",
             "sizes": "512x512",
             "type": "image/png",
-            "purpose": "any maskable"
+            "purpose": "any"
+        },
+        {
+            "src": "/icons/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
         }
     ]
 }
