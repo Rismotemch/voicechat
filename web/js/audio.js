@@ -84,7 +84,8 @@ class AudioManager {
         }
     }
 
-    async startMicrophone(echoCancellation = true) {
+    // В web/js/audio.js -> метод startMicrophone:
+    async startMicrophone(echoCancellation = false) { // По умолчанию отключаем AEC
         await this.init();
         await this.unlockAudioContext();
         await this.ensureWorkletLoaded();
@@ -93,12 +94,14 @@ class AudioManager {
             this.stopMicrophone();
         }
 
+        // Чистый аппаратный захват без разрывов буфера
         const constraints = {
             audio: {
-                echoCancellation: echoCancellation,
-                noiseSuppression: true,
-                autoGainControl: true,
-                channelCount: 1
+                echoCancellation: Boolean(echoCancellation),
+                noiseSuppression: false, // Отключаем спектральный шумодав браузера
+                autoGainControl: false,  // AGC уже делает наш Go-сервер
+                channelCount: 1,
+                latency: 0               // Запрос на минимальный hardware buffer
             },
             video: false
         };
@@ -106,7 +109,6 @@ class AudioManager {
         this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
         this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-        // Инициализация легковесного потокового AudioWorkletNode
         this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture-processor');
 
         this.workletNode.port.onmessage = (event) => {
@@ -117,7 +119,6 @@ class AudioManager {
             }
         };
 
-        // Связываем ноды
         this.micSourceNode.connect(this.analyserNode);
         this.micSourceNode.connect(this.workletNode);
     }
