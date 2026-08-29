@@ -19,15 +19,13 @@ if (window.voiceChatApp) {
         volumeLevels: new Map(),
         speakingThreshold: 0.005,
         speakingUsers: new Set(),
-        bitrate: 64000,
         sampleRate: 48000,
-        bufferSize: 960,
+        bufferSize: 2048, // Исправлено: 2048 для Safari
         masterVolume: 1.0,
         noiseSuppressionEnabled: true,
         echoCancellationEnabled: true
     };
 
-    // DOM элементы
     const elements = {
         connectionPanel: document.getElementById('connectionPanel'),
         participantsGrid: document.getElementById('participantsGrid'),
@@ -40,7 +38,6 @@ if (window.voiceChatApp) {
         closeSettingsBtn: document.getElementById('closeSettingsBtn')
     };
 
-    // DOM элементы для комнат
     const roomElements = {
         roomSelectionPanel: document.getElementById('roomSelectionPanel'),
         roomsList: document.getElementById('roomsList'),
@@ -51,11 +48,9 @@ if (window.voiceChatApp) {
         footerControls: document.getElementById('footerControls')
     };
 
-    // Выбор комнаты
     let selectedRoomId = 'main';
     let selectedRoomName = 'main';
 
-    // Инициализация
     document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         setupSettingsListeners();
@@ -72,7 +67,6 @@ if (window.voiceChatApp) {
             if (e.key === 'Enter') joinRoom();
         });
 
-        // Обработчики для комнат
         if (roomElements.createRoomBtn) {
             roomElements.createRoomBtn.addEventListener('click', createRoom);
         }
@@ -93,7 +87,6 @@ if (window.voiceChatApp) {
             micSensitivity.addEventListener('input', (e) => {
                 const value = parseInt(e.target.value);
                 if (micSensitivityValue) micSensitivityValue.textContent = value + '%';
-
                 state.speakingThreshold = 0.005 * (200 - value) / 100;
             });
         }
@@ -152,21 +145,14 @@ if (window.voiceChatApp) {
 
         state.processingChain = [];
 
-        // Эквалайзер
         const eq = createEqualizer();
         state.processingChain.push(...eq);
 
-        // Компрессор
         const compressor = createCompressor();
         state.processingChain.push(compressor);
 
-        // Noise Gate
         const noiseGate = createNoiseGate();
         state.processingChain.push(noiseGate);
-
-        // Эхоподавление
-        const echoCanceller = createEchoCanceller();
-        state.processingChain.push(echoCanceller);
     }
 
     function createEqualizer() {
@@ -185,12 +171,6 @@ if (window.voiceChatApp) {
         presence.gain.value = 4;
         filters.push(presence);
 
-        const deEsser = state.audioContext.createBiquadFilter();
-        deEsser.type = 'notch';
-        deEsser.frequency.value = 6000;
-        deEsser.Q.value = 2;
-        filters.push(deEsser);
-
         return filters;
     }
 
@@ -205,7 +185,7 @@ if (window.voiceChatApp) {
     }
 
     function createNoiseGate() {
-        const noiseGate = state.audioContext.createScriptProcessor(512, 1, 1);
+        const noiseGate = state.audioContext.createScriptProcessor(2048, 1, 1);
         const threshold = 0.003;
 
         noiseGate.onaudioprocess = (event) => {
@@ -231,16 +211,6 @@ if (window.voiceChatApp) {
         return noiseGate;
     }
 
-    function createEchoCanceller() {
-        const echoCanceller = state.audioContext.createDynamicsCompressor();
-        echoCanceller.threshold.value = -30;
-        echoCanceller.knee.value = 5;
-        echoCanceller.ratio.value = 3;
-        echoCanceller.attack.value = 0.0005;
-        echoCanceller.release.value = 0.03;
-        return echoCanceller;
-    }
-
     async function startMicrophone() {
         await initAudioProcessing();
 
@@ -250,8 +220,7 @@ if (window.voiceChatApp) {
                 noiseSuppression: state.noiseSuppressionEnabled,
                 autoGainControl: true,
                 channelCount: 1,
-                sampleRate: state.sampleRate,
-                latency: 0.005
+                sampleRate: state.sampleRate
             },
             video: false
         });
@@ -269,7 +238,8 @@ if (window.voiceChatApp) {
         analyser.smoothingTimeConstant = 0.8;
         currentNode.connect(analyser);
 
-        state.audioProcessor = state.audioContext.createScriptProcessor(state.bufferSize, 1, 1);
+        // Используем 2048 для Safari
+        state.audioProcessor = state.audioContext.createScriptProcessor(2048, 1, 1);
 
         state.audioProcessor.onaudioprocess = (event) => {
             if (!state.isJoined || state.isMuted) return;
@@ -315,8 +285,7 @@ if (window.voiceChatApp) {
     function floatToPCM16Optimized(float32Array) {
         const pcm16 = new Int16Array(float32Array.length);
         for (let i = 0; i < float32Array.length; i++) {
-            const dither = (Math.random() * 2 - 1) * 0.0001;
-            const s = Math.max(-1, Math.min(1, float32Array[i] + dither));
+            const s = Math.max(-1, Math.min(1, float32Array[i]));
             pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
         return pcm16.buffer;
@@ -348,9 +317,6 @@ if (window.voiceChatApp) {
             if (rms > state.speakingThreshold) {
                 state.speakingUsers.add(userId);
                 updateSpeakingIndicator(userId, true);
-            } else {
-                state.speakingUsers.delete(userId);
-                updateSpeakingIndicator(userId, false);
             }
 
             const volume = (state.volumeLevels.get(userId) || 1.0) * state.masterVolume;
@@ -403,14 +369,14 @@ if (window.voiceChatApp) {
         localStorage.setItem('voicechat_username', userName);
 
         try {
-            await startMicrophone();
-
+            // Создаём пользователя ДО подключения
             state.user = {
                 id: 'user_' + Math.random().toString(36).substring(2, 11),
                 name: userName,
                 avatarColor: generateRandomColor()
             };
 
+            await startMicrophone();
             await connectWebSocket();
 
             elements.connectionPanel.style.display = 'none';
@@ -422,11 +388,6 @@ if (window.voiceChatApp) {
 
             state.isJoined = true;
             console.log('Joined room as', userName);
-
-            // Запрашиваем Wake Lock
-            if (window.pwaManager) {
-                window.pwaManager.requestWakeLock();
-            }
 
         } catch (error) {
             console.error('Failed to join room:', error);
@@ -452,13 +413,10 @@ if (window.voiceChatApp) {
                         avatarColor: state.user.avatarColor,
                         roomId: selectedRoomId || 'main'
                     });
+                    resolve();
                 } else {
-                    console.error('User not initialized');
                     reject(new Error('User not initialized'));
-                    return;
                 }
-
-                resolve();
             };
 
             state.ws.onmessage = (event) => {
@@ -476,10 +434,7 @@ if (window.voiceChatApp) {
 
             state.ws.onclose = () => {
                 console.log('WebSocket disconnected');
-                if (state.isJoined && state.reconnectAttempts < state.maxReconnectAttempts) {
-                    state.reconnectAttempts++;
-                    setTimeout(() => connectWebSocket().catch(console.error), 2000);
-                } else if (state.isJoined) {
+                if (state.isJoined) {
                     leaveRoom();
                 }
             };
@@ -489,7 +444,6 @@ if (window.voiceChatApp) {
     function handleJSONMessage(data) {
         try {
             const message = JSON.parse(data);
-            console.log('Received message:', message.type);
 
             switch (message.type) {
                 case 'room_state':
@@ -509,10 +463,7 @@ if (window.voiceChatApp) {
                     break;
                 case 'error':
                     console.error('Server error:', message.payload.message);
-                    alert('Ошибка: ' + message.payload.message);
                     break;
-                default:
-                    console.warn('Unknown message type:', message.type);
             }
         } catch (error) {
             console.error('Failed to parse message:', error);
@@ -520,8 +471,6 @@ if (window.voiceChatApp) {
     }
 
     function handleRoomState(payload) {
-        console.log('Room state:', payload);
-
         if (payload.users) {
             payload.users.forEach(user => {
                 if (state.user && user.id !== state.user.id) {
@@ -532,16 +481,12 @@ if (window.voiceChatApp) {
     }
 
     function handleUserJoined(payload) {
-        console.log('User joined:', payload.user);
-
         if (payload.user && state.user && payload.user.id !== state.user.id) {
             addParticipantToUI(payload.user, false);
         }
     }
 
     function handleUserLeft(payload) {
-        console.log('User left:', payload.userId);
-
         const participant = state.participants.get(payload.userId);
         if (participant) {
             participant.card.remove();
@@ -550,7 +495,6 @@ if (window.voiceChatApp) {
     }
 
     function handleRoomCreated(payload) {
-        console.log('Room created:', payload.room);
         if (payload.room) {
             selectedRoomId = payload.room.id;
             selectedRoomName = payload.room.name;
@@ -562,8 +506,6 @@ if (window.voiceChatApp) {
     }
 
     function handleRoomsList(payload) {
-        console.log('Rooms list:', payload);
-
         if (!payload.rooms || !roomElements.roomsList) return;
 
         roomElements.roomsList.innerHTML = '';
@@ -578,7 +520,8 @@ if (window.voiceChatApp) {
 
             const userCount = document.createElement('div');
             userCount.className = 'room-users';
-            userCount.textContent = `👥 ${room.users ? Object.keys(room.users).length : 0} участников`;
+            const count = room.users ? Object.keys(room.users).length : 0;
+            userCount.textContent = `👥 ${count} участников`;
 
             roomCard.appendChild(roomName);
             roomCard.appendChild(userCount);
@@ -616,6 +559,7 @@ if (window.voiceChatApp) {
         stopMicrophone();
 
         state.isJoined = false;
+        state.user = null;
         state.participants.clear();
 
         if (elements.connectionPanel) elements.connectionPanel.style.display = 'none';
@@ -653,8 +597,6 @@ if (window.voiceChatApp) {
     function leaveRoom() {
         console.log('Leaving room');
 
-        state.reconnectAttempts = 0;
-
         if (state.ws) {
             state.ws.close();
             state.ws = null;
@@ -670,8 +612,6 @@ if (window.voiceChatApp) {
         if (elements.participantsGrid) elements.participantsGrid.style.display = 'none';
         if (elements.participantsGrid) elements.participantsGrid.innerHTML = '';
         if (roomElements.footerControls) roomElements.footerControls.style.display = 'none';
-
-        console.log('Left room');
     }
 
     function toggleMute() {
@@ -686,8 +626,6 @@ if (window.voiceChatApp) {
         if (elements.micBtn) {
             elements.micBtn.textContent = state.isMuted ? '🔇' : '🎤';
         }
-
-        console.log(state.isMuted ? 'Muted' : 'Unmuted');
     }
 
     function openSettings() {
