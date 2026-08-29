@@ -1,6 +1,6 @@
 /**
  * VoiceChat Client Engine - web/js/main.js
- * High-performance WebSocket & UI Controller integrated with AudioManager and PWAManager.
+ * Integrated with Host Controls, Ping/Telemetry, Live Visualizer & Invite Links.
  */
 
 (() => {
@@ -18,11 +18,16 @@
     const state = {
         ws: null,
         user: null,
-        participants: new Map(), // userId -> { user, card, isSelf }
+        participants: new Map(), // userId -> { user, card, isSelf, canvas, ctx }
         isJoined: false,
         isMuted: false,
 
-        // Настройки аудио и чувствительности
+        // Роли и статус комнаты
+        hostId: null,
+        isHost: false,
+        isLocked: false,
+
+        // Настройки
         echoCancellationEnabled: true,
         masterVolume: 1.0,
         micSensitivity: 100,
@@ -33,6 +38,10 @@
         currentRoomPassword: null,
         pendingRoomId: null,
         pendingRoomName: null,
+
+        // Телеметрия и пинг
+        pingInterval: null,
+        visualizerAnimId: null,
 
         // Соединение
         reconnectAttempts: 0,
@@ -76,7 +85,13 @@
         roomNameInput: document.getElementById('roomNameInput'),
         roomPasswordInput: document.getElementById('roomPasswordInput'),
         roomMaxUsersInput: document.getElementById('roomMaxUsersInput'),
-        roomPasswordCheckInput: document.getElementById('roomPasswordCheckInput')
+        roomPasswordCheckInput: document.getElementById('roomPasswordCheckInput'),
+
+        // Элементы хост-панели и инвайтов (создаются динамически или из HTML)
+        hostControlsBar: null,
+        lockRoomBtn: null,
+        muteAllBtn: null,
+        shareInviteBtn: null
     };
 
     // =========================================================================
@@ -84,9 +99,10 @@
     // =========================================================================
     document.addEventListener('DOMContentLoaded', () => {
         initUserProfile();
+        setupDynamicHostBar();
         bindUIEvents();
         setupAudioCallbacks();
-        showRoomSelectionView();
+        checkInviteUrl();
     });
 
     function initUserProfile() {
@@ -106,15 +122,63 @@
         }
     }
 
+    function setupDynamicHostBar() {
+        // Создаем плавающую панель для хост-контроля и шеринга инвайт-ссылок
+        let bar = document.getElementById('hostControlsBar');
+        if (!bar) {
+            bar = document.createElement('div');
+            bar.id = 'hostControlsBar';
+            bar.className = 'host-controls-bar glass';
+            bar.style.display = 'none';
+
+            bar.innerHTML = `
+                <button id="shareInviteBtn" class="action-chip" title="Скопировать ссылку для приглашения">🔗 Пригласить</button>
+                <button id="lockRoomBtn" class="action-chip" title="Закрыть вход в комнату" style="display: none;">🔓 Открыта</button>
+                <button id="muteAllBtn" class="action-chip danger" title="Заглушить всех собеседников" style="display: none;">🔇 Заглушить всех</button>
+            `;
+
+            const mainContent = document.querySelector('.main-content');
+            if (mainContent) {
+                mainContent.insertBefore(bar, dom.participantsGrid);
+            }
+        }
+
+        dom.hostControlsBar = bar;
+        dom.shareInviteBtn = document.getElementById('shareInviteBtn');
+        dom.lockRoomBtn = document.getElementById('lockRoomBtn');
+        dom.muteAllBtn = document.getElementById('muteAllBtn');
+    }
+
+    function checkInviteUrl() {
+        // Парсинг параметров инвайта: voice.repozis.ru/#join=roomId&pwd=pass
+        const hash = window.location.hash.substring(1);
+        if (!hash) {
+            showRoomSelectionView();
+            return;
+        }
+
+        const params = new URLSearchParams(hash);
+        const joinRoomId = params.get('join');
+        const pwd = params.get('pwd');
+
+        if (joinRoomId) {
+            state.selectedRoomId = joinRoomId;
+            state.selectedRoomName = joinRoomId;
+            if (pwd) state.currentRoomPassword = pwd;
+
+            selectRoom(joinRoomId, joinRoomId);
+        } else {
+            showRoomSelectionView();
+        }
+    }
+
     function setupAudioCallbacks() {
-        // 1. Отправка исходящих квантов аудио (20ms PCM16) в WebSocket
         window.audioManager.onAudioFrame = (pcmBuffer) => {
             if (state.isJoined && !state.isMuted && state.ws && state.ws.readyState === WebSocket.OPEN) {
                 state.ws.send(pcmBuffer);
             }
         };
 
-        // 2. Отображение индикаторов активности голоса (VAD)
         window.audioManager.onSpeakingStateChange = (userId, isSpeaking) => {
             const targetId = userId === 'self' && state.user ? state.user.id : userId;
             updateSpeakingUI(targetId, isSpeaking);
@@ -135,24 +199,23 @@
         if (dom.confirmPasswordBtn) dom.confirmPasswordBtn.addEventListener('click', () => handlePasswordSubmit());
         if (dom.cancelPasswordBtn) dom.cancelPasswordBtn.addEventListener('click', () => closePasswordModal());
 
-        // Ползунок чувствительности микрофона
+        // Хост-действия и инвайты
+        if (dom.shareInviteBtn) dom.shareInviteBtn.addEventListener('click', () => copyInviteLink());
+        if (dom.lockRoomBtn) dom.lockRoomBtn.addEventListener('click', () => toggleLockRoom());
+        if (dom.muteAllBtn) dom.muteAllBtn.addEventListener('click', () => triggerMuteAll());
+
         if (dom.micSensitivity) {
             dom.micSensitivity.addEventListener('input', (e) => {
                 const val = parseInt(e.target.value, 10) || 0;
                 state.micSensitivity = val;
-                if (dom.micSensitivityValue) {
-                    dom.micSensitivityValue.textContent = `${val}%`;
-                }
+                if (dom.micSensitivityValue) dom.micSensitivityValue.textContent = `${val}%`;
             });
         }
 
-        // Ползунок общей громкости
         if (dom.masterVolume) {
             dom.masterVolume.addEventListener('input', (e) => {
                 const val = parseInt(e.target.value, 10) || 0;
-                if (dom.masterVolumeValue) {
-                    dom.masterVolumeValue.textContent = `${val}%`;
-                }
+                if (dom.masterVolumeValue) dom.masterVolumeValue.textContent = `${val}%`;
                 state.masterVolume = val / 100;
                 window.audioManager.setMasterVolume(state.masterVolume);
             });
@@ -212,13 +275,12 @@
                     if (typeof event.data === 'string') {
                         handleSignalingMessage(event.data);
                     } else if (event.data instanceof ArrayBuffer) {
-                        // Воспроизведение обработанного сервером аудио с независимым джиттер-буфером
                         window.audioManager.playAudioPacket(event.data);
                     }
                 };
 
                 state.ws.onerror = (err) => {
-                    console.error('[VoiceChat] WebSocket transport error:', err);
+                    console.error('[VoiceChat] WebSocket error:', err);
                 };
 
                 state.ws.onclose = (event) => {
@@ -290,14 +352,39 @@
                 case 'error':
                     onServerError(msg.payload);
                     break;
+
+                // --- Телеметрия и Хост-контроль ---
+                case 'pong':
+                    onPong(msg.payload);
+                    break;
+                case 'user_ping_updated':
+                    onUserPingUpdated(msg.payload);
+                    break;
+                case 'host_changed':
+                    onHostChanged(msg.payload);
+                    break;
+                case 'room_locked_updated':
+                    onRoomLockedUpdated(msg.payload);
+                    break;
+                case 'kicked':
+                    onKicked(msg.payload);
+                    break;
+                case 'force_mute':
+                    onForceMute();
+                    break;
             }
         } catch (err) {
-            console.error('[VoiceChat] Error parsing signaling payload:', err);
+            console.error('[VoiceChat] Parse error:', err);
         }
     }
 
     function onRoomState(payload) {
         clearParticipantsUI();
+
+        state.hostId = payload.hostId || null;
+        state.isHost = Boolean(state.user && state.hostId === state.user.id);
+        state.isLocked = Boolean(payload.isLocked);
+
         if (Array.isArray(payload.users)) {
             payload.users.forEach(u => {
                 const isSelf = Boolean(state.user && u.id === state.user.id);
@@ -309,9 +396,18 @@
         dom.connectionPanel.style.display = 'none';
         dom.participantsGrid.style.display = 'grid';
         dom.footerControls.style.display = 'flex';
+
+        if (dom.hostControlsBar) {
+            dom.hostControlsBar.style.display = 'flex';
+        }
+
+        updateHostControlsUI();
         updateRoomLabel();
 
-        // Активация WakeLock и медиа-сессии
+        // Запуск фоновых процессов звонка
+        startPingLoop();
+        startVisualizerLoop();
+
         if (window.pwaManager) {
             window.pwaManager.acquireWakeLock();
             window.pwaManager.setupMediaSession(state.selectedRoomName);
@@ -411,22 +507,149 @@
     }
 
     // =========================================================================
+    // Пинг и Хост-контроль хендлеры
+    // =========================================================================
+    function onPong(payload) {
+        if (!payload.clientTimestamp) return;
+        const pingMs = Math.max(1, Date.now() - payload.clientTimestamp);
+        if (state.user) {
+            updateUserPingUI(state.user.id, pingMs);
+            sendSignaling('ping_report', { pingMs });
+        }
+    }
+
+    function onUserPingUpdated(payload) {
+        if (payload.userId && typeof payload.pingMs === 'number') {
+            updateUserPingUI(payload.userId, payload.pingMs);
+        }
+    }
+
+    function onHostChanged(payload) {
+        state.hostId = payload.hostId;
+        state.isHost = Boolean(state.user && state.hostId === state.user.id);
+        updateHostControlsUI();
+
+        // Обновляем бейджи Хоста на карточках участников
+        state.participants.forEach((p, uid) => {
+            const isHost = (uid === state.hostId);
+            const hostBadge = p.card.querySelector('.host-badge');
+            if (hostBadge) hostBadge.style.display = isHost ? 'inline-block' : 'none';
+        });
+    }
+
+    function onRoomLockedUpdated(payload) {
+        state.isLocked = Boolean(payload.isLocked);
+        if (dom.lockRoomBtn) {
+            dom.lockRoomBtn.textContent = state.isLocked ? '🔒 Закрыта' : '🔓 Открыта';
+            dom.lockRoomBtn.classList.toggle('danger', state.isLocked);
+        }
+    }
+
+    function onKicked(payload) {
+        alert(payload.message || 'Вы были исключены создателем комнаты');
+        leaveRoom();
+    }
+
+    function onForceMute() {
+        if (!state.isMuted) {
+            toggleMute();
+        }
+    }
+
+    function startPingLoop() {
+        stopPingLoop();
+        state.pingInterval = setInterval(() => {
+            if (state.isJoined && state.ws && state.ws.readyState === WebSocket.OPEN) {
+                sendSignaling('ping', { clientTimestamp: Date.now() });
+            }
+        }, 3000);
+    }
+
+    function stopPingLoop() {
+        if (state.pingInterval) {
+            clearInterval(state.pingInterval);
+            state.pingInterval = null;
+        }
+    }
+
+    // =========================================================================
+    // Хост-действия и Инвайты
+    // =========================================================================
+    function copyInviteLink() {
+        const url = new URL(window.location.origin + window.location.pathname);
+        url.hash = `join=${encodeURIComponent(state.selectedRoomId)}`;
+        if (state.currentRoomPassword) {
+            url.hash += `&pwd=${encodeURIComponent(state.currentRoomPassword)}`;
+        }
+
+        navigator.clipboard.writeText(url.toString()).then(() => {
+            if (dom.shareInviteBtn) {
+                const originalText = dom.shareInviteBtn.textContent;
+                dom.shareInviteBtn.textContent = '✓ Ссылка скопирована!';
+                setTimeout(() => {
+                    dom.shareInviteBtn.textContent = originalText;
+                }, 2000);
+            }
+        }).catch(() => {
+            prompt('Скопируйте ссылку для приглашения:', url.toString());
+        });
+    }
+
+    function toggleLockRoom() {
+        if (!state.isHost) return;
+        const newLockState = !state.isLocked;
+        sendSignaling('lock_room', { isLocked: newLockState });
+    }
+
+    function triggerMuteAll() {
+        if (!state.isHost) return;
+        if (confirm('Заглушить микрофоны всех участников?')) {
+            sendSignaling('mute_all', { isMuted: true });
+        }
+    }
+
+    function triggerKickUser(targetUserId, targetUserName) {
+        if (!state.isHost) return;
+        if (confirm(`Исключить ${targetUserName} из комнаты?`)) {
+            sendSignaling('kick_user', { targetUserId });
+        }
+    }
+
+    function updateHostControlsUI() {
+        const display = state.isHost ? 'inline-flex' : 'none';
+        if (dom.lockRoomBtn) {
+            dom.lockRoomBtn.style.display = display;
+            dom.lockRoomBtn.textContent = state.isLocked ? '🔒 Закрыта' : '🔓 Открыта';
+            dom.lockRoomBtn.classList.toggle('danger', state.isLocked);
+        }
+        if (dom.muteAllBtn) {
+            dom.muteAllBtn.style.display = display;
+        }
+
+        // Обновляем видимость кнопок Kick на карточках
+        state.participants.forEach((p, uid) => {
+            const kickBtn = p.card.querySelector('.kick-btn');
+            if (kickBtn) {
+                kickBtn.style.display = (state.isHost && !p.isSelf) ? 'flex' : 'none';
+            }
+        });
+    }
+
+    // =========================================================================
     // UI & Управление вызовами
     // =========================================================================
     async function joinRoom() {
         if (!state.user) initUserProfile();
 
-        // 1. Запуск аудио по прямому жесту пользователя (разблокировка Autoplay Policy)
         try {
             await window.audioManager.init();
             await window.audioManager.startMicrophone(state.echoCancellationEnabled);
         } catch (err) {
-            console.error('[VoiceChat] Microphone permission denied or failed:', err);
+            console.error('[VoiceChat] Microphone access failed:', err);
             alert('Не удалось получить доступ к микрофону. Проверьте разрешения в браузере.');
             return;
         }
 
-        // 2. Подключение к WebSocket
         try {
             await connectWebSocket();
             sendJoinPayload();
@@ -453,6 +676,9 @@
             sendSignaling('leave', { roomId: state.selectedRoomId });
         }
 
+        stopPingLoop();
+        stopVisualizerLoop();
+
         if (window.pwaManager) {
             window.pwaManager.releaseWakeLock();
         }
@@ -461,8 +687,11 @@
         state.isJoined = false;
         clearParticipantsUI();
 
+        if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'none';
         dom.participantsGrid.style.display = 'none';
         dom.footerControls.style.display = 'none';
+
+        window.location.hash = '';
         showRoomSelectionView();
     }
 
@@ -483,11 +712,14 @@
     function showRoomSelectionView() {
         closeCreateRoomModal();
         closePasswordModal();
+        stopPingLoop();
+        stopVisualizerLoop();
         window.audioManager.stopMicrophone();
 
         state.isJoined = false;
         clearParticipantsUI();
 
+        if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'none';
         dom.roomSelectionPanel.style.display = 'block';
         dom.connectionPanel.style.display = 'none';
         dom.participantsGrid.style.display = 'none';
@@ -529,20 +761,14 @@
         }
         if (dom.micSensitivity) {
             dom.micSensitivity.value = state.micSensitivity;
-            if (dom.micSensitivityValue) {
-                dom.micSensitivityValue.textContent = `${state.micSensitivity}%`;
-            }
+            if (dom.micSensitivityValue) dom.micSensitivityValue.textContent = `${state.micSensitivity}%`;
         }
         if (dom.masterVolume) {
             const volPercent = Math.round(state.masterVolume * 100);
             dom.masterVolume.value = volPercent;
-            if (dom.masterVolumeValue) {
-                dom.masterVolumeValue.textContent = `${volPercent}%`;
-            }
+            if (dom.masterVolumeValue) dom.masterVolumeValue.textContent = `${volPercent}%`;
         }
-        if (dom.settingsModal) {
-            dom.settingsModal.style.display = 'flex';
-        }
+        if (dom.settingsModal) dom.settingsModal.style.display = 'flex';
     }
 
     function saveSettings() {
@@ -565,9 +791,7 @@
             }
         }
 
-        if (dom.settingsModal) {
-            dom.settingsModal.style.display = 'none';
-        }
+        if (dom.settingsModal) dom.settingsModal.style.display = 'none';
     }
 
     function openCreateRoomModal() {
@@ -641,7 +865,7 @@
     }
 
     // =========================================================================
-    // Карточки участников
+    // Карточки участников, Телеметрия и Визуализатор волн (60 FPS)
     // =========================================================================
     function addParticipantToUI(user, isSelf = false) {
         if (!user || !user.id || state.participants.has(user.id)) return;
@@ -650,18 +874,63 @@
         card.className = 'participant-card glass';
         card.id = `participant-${user.id}`;
 
+        // Кнопка Kick (для Хоста)
+        const kickBtn = document.createElement('button');
+        kickBtn.className = 'kick-btn';
+        kickBtn.title = 'Исключить участника';
+        kickBtn.textContent = '✕';
+        kickBtn.style.display = (state.isHost && !isSelf) ? 'flex' : 'none';
+        kickBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            triggerKickUser(user.id, user.name);
+        });
+        card.appendChild(kickBtn);
+
+        // Индикатор пинга (Badge)
+        const pingBadge = document.createElement('div');
+        pingBadge.className = 'ping-badge ping-good';
+        pingBadge.id = `ping-${user.id}`;
+        pingBadge.textContent = '0ms';
+        card.appendChild(pingBadge);
+
+        // Обертка аватара с холстом визуализатора волн
+        const avatarWrapper = document.createElement('div');
+        avatarWrapper.className = 'avatar-wrapper';
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'avatar-visualizer-canvas';
+        canvas.width = 120;
+        canvas.height = 120;
+        const ctx = canvas.getContext('2d');
+
         const avatar = document.createElement('div');
         avatar.className = 'avatar';
         avatar.style.background = user.avatarColor || getRandomAvatarColor();
         avatar.textContent = (user.name || 'U').charAt(0).toUpperCase();
 
+        avatarWrapper.appendChild(canvas);
+        avatarWrapper.appendChild(avatar);
+        card.appendChild(avatarWrapper);
+
+        // Имя и бейдж Хоста
+        const nameContainer = document.createElement('div');
+        nameContainer.className = 'name-container';
+
         const name = document.createElement('div');
         name.className = 'participant-name';
         name.textContent = isSelf ? `${user.name} (Вы)` : user.name;
+        nameContainer.appendChild(name);
 
-        card.appendChild(avatar);
-        card.appendChild(name);
+        const isUserHost = (user.id === state.hostId);
+        const hostBadge = document.createElement('span');
+        hostBadge.className = 'host-badge';
+        hostBadge.textContent = '👑 Хост';
+        hostBadge.style.display = isUserHost ? 'inline-block' : 'none';
+        nameContainer.appendChild(hostBadge);
 
+        card.appendChild(nameContainer);
+
+        // Ползунок громкости собеседника
         if (!isSelf) {
             const volContainer = document.createElement('div');
             volContainer.className = 'range-wrapper';
@@ -695,7 +964,7 @@
             dom.participantsGrid.appendChild(card);
         }
 
-        state.participants.set(user.id, { user, card, isSelf });
+        state.participants.set(user.id, { user, card, isSelf, canvas, ctx });
     }
 
     function removeParticipantFromUI(userId) {
@@ -718,6 +987,90 @@
         if (card) {
             card.classList.toggle('speaking', Boolean(isSpeaking));
         }
+    }
+
+    function updateUserPingUI(userId, pingMs) {
+        const pingEl = document.getElementById(`ping-${userId}`);
+        if (!pingEl) return;
+
+        pingEl.textContent = `${pingMs}ms`;
+        pingEl.className = 'ping-badge';
+
+        if (pingMs < 80) {
+            pingEl.classList.add('ping-good');
+        } else if (pingMs < 180) {
+            pingEl.classList.add('ping-medium');
+        } else {
+            pingEl.classList.add('ping-bad');
+        }
+    }
+
+    // =========================================================================
+    // Отрисовка живой волны / спектра (Canvas Voice Visualizer)
+    // =========================================================================
+    function startVisualizerLoop() {
+        stopVisualizerLoop();
+
+        const render = () => {
+            state.participants.forEach((p, userId) => {
+                if (!p.ctx || !p.canvas) return;
+
+                const freqData = window.audioManager.getFrequencyData(p.isSelf ? 'self' : userId);
+                drawWaveVisualizer(p.ctx, p.canvas, freqData);
+            });
+
+            state.visualizerAnimId = requestAnimationFrame(render);
+        };
+
+        state.visualizerAnimId = requestAnimationFrame(render);
+    }
+
+    function stopVisualizerLoop() {
+        if (state.visualizerAnimId) {
+            cancelAnimationFrame(state.visualizerAnimId);
+            state.visualizerAnimId = null;
+        }
+    }
+
+    function drawWaveVisualizer(ctx, canvas, freqData) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (!freqData || freqData.length === 0) return;
+
+        // Расчет средней энергии низких и средних частот
+        let sum = 0;
+        const count = Math.min(freqData.length, 16);
+        for (let i = 0; i < count; i++) {
+            sum += freqData[i];
+        }
+        const avg = sum / count;
+
+        if (avg < 5) return; // Порог тишины
+
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const baseRadius = 36;
+        const maxWaveHeight = 16;
+        const waveScale = (avg / 255) * maxWaveHeight;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, baseRadius + waveScale, 0, 2 * Math.PI);
+        ctx.strokeStyle = `rgba(124, 108, 255, ${Math.min(0.8, avg / 180)})`;
+        ctx.lineWidth = 2.5;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#7c6cff';
+        ctx.stroke();
+
+        // Дополнительное внешнее пульсирующее кольцо при громкой речи
+        if (avg > 80) {
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, baseRadius + waveScale * 1.5, 0, 2 * Math.PI);
+            ctx.strokeStyle = `rgba(167, 139, 250, ${Math.min(0.4, avg / 255)})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+        ctx.restore();
     }
 
     function getRandomAvatarColor() {

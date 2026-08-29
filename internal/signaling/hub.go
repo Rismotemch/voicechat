@@ -112,7 +112,7 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (c *Client) readPump() {
 	defer func() {
 		c.Hub.removeClient(c)
-		c.Conn.Close()
+		_ = c.Conn.Close()
 	}()
 
 	c.Conn.SetReadLimit(maxMessageSize)
@@ -133,10 +133,8 @@ func (c *Client) readPump() {
 
 		switch messageType {
 		case websocket.BinaryMessage:
-			// Входящий бинарный PCM фрейм от микрофона клиента
 			c.handleAudioData(message)
 		case websocket.TextMessage:
-			// Сигнальное JSON сообщение
 			c.handleTextMessage(message)
 		}
 	}
@@ -146,7 +144,7 @@ func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
-		c.Conn.Close()
+		_ = c.Conn.Close()
 	}()
 
 	for {
@@ -154,14 +152,10 @@ func (c *Client) writePump() {
 		case message, ok := <-c.Send:
 			_ = c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// Канал закрыт — отправляем CloseFrame
 				_ = c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			// Детекция типа сообщения:
-			// Сигнальный JSON всегда начинается с '{' (0x7B)
-			// Аудио-пакет начинается с uint16 big-endian ID length (обычно 0x00)
 			if len(message) > 0 && message[0] == '{' {
 				if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 					return
@@ -182,7 +176,7 @@ func (c *Client) writePump() {
 }
 
 // =============================================================================
-// Обработка сигнальных сообщений (Signaling)
+// Сигнальные структуры сообщений
 // =============================================================================
 
 type Message struct {
@@ -199,12 +193,9 @@ type JoinMessage struct {
 }
 
 type CreateRoomMessage struct {
-	RoomName         string `json:"roomName"`
-	Password         string `json:"password,omitempty"`
-	MaxUsers         int    `json:"maxUsers,omitempty"`
-	CatInBagMode     bool   `json:"catInBagMode,omitempty"`
-	SpatialAudioMode bool   `json:"spatialAudioMode,omitempty"`
-	HighQualityMode  bool   `json:"highQualityMode,omitempty"`
+	RoomName string `json:"roomName"`
+	Password string `json:"password,omitempty"`
+	MaxUsers int    `json:"maxUsers,omitempty"`
 }
 
 type MuteMessage struct {
@@ -218,6 +209,30 @@ type LeaveMessage struct {
 type UpdateProfileMessage struct {
 	UserName string `json:"userName"`
 }
+
+type PingMessage struct {
+	ClientTimestamp int64 `json:"clientTimestamp"`
+}
+
+type PingReportMessage struct {
+	PingMs int `json:"pingMs"`
+}
+
+type KickUserMessage struct {
+	TargetUserID string `json:"targetUserId"`
+}
+
+type LockRoomMessage struct {
+	IsLocked bool `json:"isLocked"`
+}
+
+type MuteAllMessage struct {
+	IsMuted bool `json:"isMuted"`
+}
+
+// =============================================================================
+// Обработка текстовых сообщений
+// =============================================================================
 
 func (c *Client) handleTextMessage(data []byte) {
 	var msg Message
@@ -254,6 +269,35 @@ func (c *Client) handleTextMessage(data []byte) {
 		}
 	case "get_rooms":
 		c.handleGetRooms()
+
+	// --- Телеметрия (RTT / Ping) ---
+	case "ping":
+		var p PingMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handlePing(p)
+		}
+	case "ping_report":
+		var p PingReportMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handlePingReport(p)
+		}
+
+	// --- Администрирование комнат (Host Controls) ---
+	case "kick_user":
+		var p KickUserMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleKickUser(p)
+		}
+	case "lock_room":
+		var p LockRoomMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleLockRoom(p)
+		}
+	case "mute_all":
+		var p MuteAllMessage
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.handleMuteAll(p)
+		}
 	}
 }
 
@@ -277,14 +321,6 @@ func (c *Client) handleJoin(msg JoinMessage) {
 		return
 	}
 
-	// Проверка лимита участников
-	if room.Count() >= room.MaxUsers {
-		c.Hub.mu.Unlock()
-		c.sendError("Комната заполнена")
-		return
-	}
-
-	// Извлечение или создание AudioHub для комнаты
 	audioHub, aHubExists := c.Hub.audioHubs[roomID]
 	if !aHubExists {
 		audioHub = NewAudioHub()
@@ -292,32 +328,22 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	}
 	c.Hub.mu.Unlock()
 
-	// Удаление из предыдущей комнаты, если клиент уже был в другой
 	if c.Room != nil {
 		c.handleLeave(LeaveMessage{RoomID: c.Room.ID})
 	}
 
-	user := &models.User{
-		ID:          msg.UserID,
-		Name:        msg.UserName,
-		AvatarColor: msg.AvatarColor,
-		JoinedAt:    time.Now(),
-	}
+	user := models.NewUser(msg.UserID, msg.UserName, msg.AvatarColor)
 
 	if err := room.AddUser(user); err != nil {
-		c.sendError("Не удалось войти в комнату")
+		if err == models.ErrRoomLocked {
+			c.sendError("Комната заблокирована хостом")
+		} else {
+			c.sendError("Комната заполнена")
+		}
 		return
 	}
 
-	// Инициализация AudioClient для DSP-пайплайна
-	audioClient := &AudioClient{
-		ID:        c.ID,
-		UserID:    user.ID,
-		Send:      c.Send,
-		IsMuted:   false,
-		Processor: NewAudioProcessor(),
-	}
-
+	audioClient := NewAudioClient(c.ID, user.ID, sendChannelCap)
 	audioHub.AddClient(audioClient)
 
 	c.mu.Lock()
@@ -326,12 +352,14 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.AudioClient = audioClient
 	c.mu.Unlock()
 
-	// 1. Отправляем текущее состояние комнаты вошедшему пользователю
+	// 1. Отправляем полное состояние комнаты вошедшему
 	c.sendJSON("room_state", map[string]interface{}{
-		"users": room.GetUsers(),
+		"users":    room.GetUsers(),
+		"hostId":   room.HostID,
+		"isLocked": room.IsLocked,
 	})
 
-	// 2. Оповещаем остальных участников комнаты
+	// 2. Оповещаем остальных участников
 	c.Hub.broadcastToRoom(room.ID, "user_joined", map[string]interface{}{
 		"user": user,
 	}, c.ID)
@@ -351,7 +379,7 @@ func (c *Client) handleLeave(msg LeaveMessage) {
 		return
 	}
 
-	room.RemoveUser(user.ID)
+	newHostID := room.RemoveUser(user.ID)
 
 	c.Hub.mu.RLock()
 	audioHub := c.Hub.audioHubs[room.ID]
@@ -364,6 +392,12 @@ func (c *Client) handleLeave(msg LeaveMessage) {
 	c.Hub.broadcastToRoom(room.ID, "user_left", map[string]interface{}{
 		"userId": user.ID,
 	}, c.ID)
+
+	if newHostID != "" {
+		c.Hub.broadcastToRoom(room.ID, "host_changed", map[string]interface{}{
+			"hostId": newHostID,
+		}, "")
+	}
 }
 
 func (c *Client) handleMute(msg MuteMessage) {
@@ -410,17 +444,15 @@ func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
 	}
 
 	maxUsers := msg.MaxUsers
-	if maxUsers <= 0 || maxUsers > 10 {
-		maxUsers = 10
+	if maxUsers <= 0 || maxUsers > models.MaxAllowedUsersPerRoom {
+		maxUsers = models.DefaultMaxUsers
 	}
 
-	roomID := "room_" + uuid.New().String()[:8]
 	room := models.NewRoom(msg.RoomName, maxUsers)
-	room.ID = roomID
 	room.Password = msg.Password
 
-	c.Hub.rooms[roomID] = room
-	c.Hub.audioHubs[roomID] = NewAudioHub()
+	c.Hub.rooms[room.ID] = room
+	c.Hub.audioHubs[room.ID] = NewAudioHub()
 	c.Hub.mu.Unlock()
 
 	c.sendJSON("room_created", map[string]interface{}{
@@ -442,7 +474,128 @@ func (c *Client) handleGetRooms() {
 }
 
 // =============================================================================
-// Обработка входящего аудио (DSP Relay)
+// Пинг и качество связи (Telemetry)
+// =============================================================================
+
+func (c *Client) handlePing(msg PingMessage) {
+	c.sendJSON("pong", map[string]interface{}{
+		"clientTimestamp": msg.ClientTimestamp,
+		"serverTimestamp": time.Now().UnixMilli(),
+	})
+}
+
+func (c *Client) handlePingReport(msg PingReportMessage) {
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil {
+		return
+	}
+
+	room.UpdateUserPing(user.ID, msg.PingMs)
+
+	c.Hub.broadcastToRoom(room.ID, "user_ping_updated", map[string]interface{}{
+		"userId": user.ID,
+		"pingMs": msg.PingMs,
+	}, "")
+}
+
+// =============================================================================
+// Администрирование комнат (Хост-контроль)
+// =============================================================================
+
+func (c *Client) handleKickUser(msg KickUserMessage) {
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil || !room.IsUserHost(user.ID) {
+		c.sendError("Только создатель комнаты может исключать участников")
+		return
+	}
+
+	if msg.TargetUserID == user.ID {
+		c.sendError("Нельзя исключить самого себя")
+		return
+	}
+
+	var targetClient *Client
+	c.Hub.mu.RLock()
+	for _, cl := range c.Hub.clients {
+		cl.mu.RLock()
+		if cl.User != nil && cl.User.ID == msg.TargetUserID && cl.Room != nil && cl.Room.ID == room.ID {
+			targetClient = cl
+		}
+		cl.mu.RUnlock()
+		if targetClient != nil {
+			break
+		}
+	}
+	c.Hub.mu.RUnlock()
+
+	if targetClient != nil {
+		targetClient.sendJSON("kicked", map[string]string{
+			"message": "Вы были исключены создателем комнаты",
+		})
+		c.Hub.removeClient(targetClient)
+	}
+}
+
+func (c *Client) handleLockRoom(msg LockRoomMessage) {
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil || !room.IsUserHost(user.ID) {
+		c.sendError("Только создатель комнаты может блокировать вход")
+		return
+	}
+
+	room.SetLocked(msg.IsLocked)
+
+	c.Hub.broadcastToRoom(room.ID, "room_locked_updated", map[string]interface{}{
+		"isLocked": msg.IsLocked,
+	}, "")
+}
+
+func (c *Client) handleMuteAll(msg MuteAllMessage) {
+	c.mu.RLock()
+	room := c.Room
+	user := c.User
+	c.mu.RUnlock()
+
+	if room == nil || user == nil || !room.IsUserHost(user.ID) {
+		c.sendError("Только создатель комнаты может управлять общим звуком")
+		return
+	}
+
+	c.Hub.mu.RLock()
+	for _, cl := range c.Hub.clients {
+		cl.mu.RLock()
+		inRoom := cl.Room != nil && cl.Room.ID == room.ID
+		isSelf := cl.User != nil && cl.User.ID == user.ID
+		cl.mu.RUnlock()
+
+		if inRoom && !isSelf {
+			if cl.AudioClient != nil {
+				cl.AudioClient.SetMute(true)
+			}
+			cl.sendJSON("force_mute", map[string]bool{"isMuted": true})
+			c.Hub.broadcastToRoom(room.ID, "user_muted", map[string]interface{}{
+				"userId":  cl.User.ID,
+				"isMuted": true,
+			}, "")
+		}
+	}
+	c.Hub.mu.RUnlock()
+}
+
+// =============================================================================
+// Аудио и вспомогательные функции
 // =============================================================================
 
 func (c *Client) handleAudioData(audioData []byte) {
@@ -460,20 +613,8 @@ func (c *Client) handleAudioData(audioData []byte) {
 	c.Hub.mu.RUnlock()
 
 	if audioHub != nil {
-		// Запуск серверной цепочки DSP (High-Pass, VAD, AGC) и рассылки
 		audioHub.ProcessAndBroadcast(c.ID, audioData)
 	}
-}
-
-// =============================================================================
-// Вспомогательные методы отправки и широковещания
-// =============================================================================
-
-// GetRoomUserCount возвращает общее количество активных WebSocket-сессий на сервере
-func (h *Hub) GetRoomUserCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.clients)
 }
 
 func (c *Client) sendJSON(msgType string, payload interface{}) {
@@ -489,7 +630,6 @@ func (c *Client) sendJSON(msgType string, payload interface{}) {
 	select {
 	case c.Send <- msg:
 	default:
-		// Дроп события, если очередь сокета переполнена
 	}
 }
 
@@ -537,7 +677,7 @@ func (h *Hub) removeClient(client *Client) {
 	client.mu.RUnlock()
 
 	if room != nil && user != nil {
-		room.RemoveUser(user.ID)
+		newHostID := room.RemoveUser(user.ID)
 
 		h.mu.RLock()
 		audioHub := h.audioHubs[room.ID]
@@ -550,7 +690,19 @@ func (h *Hub) removeClient(client *Client) {
 		h.broadcastToRoom(room.ID, "user_left", map[string]interface{}{
 			"userId": user.ID,
 		}, client.ID)
+
+		if newHostID != "" {
+			h.broadcastToRoom(room.ID, "host_changed", map[string]interface{}{
+				"hostId": newHostID,
+			}, "")
+		}
 	}
+}
+
+func (h *Hub) GetRoomUserCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
 }
 
 func (h *Hub) Close() {

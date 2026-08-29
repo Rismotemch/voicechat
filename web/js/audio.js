@@ -3,7 +3,8 @@
  * File: web/js/audio.js
  * 
  * Provides unified management of Web Audio API, AudioWorklets,
- * microphone lifecycle, per-speaker routing, and INDEPENDENT per-speaker jitter scheduling.
+ * microphone lifecycle, per-speaker routing, independent jitter buffers,
+ * and AnalyserNode spectrum/waveform data for voice visualization.
  */
 
 class AudioManager {
@@ -31,12 +32,17 @@ class AudioManager {
         /** @type {GainNode|null} */
         this.masterGain = null;
 
+        /** @type {AnalyserNode|null} Анализатор для локального микрофона */
+        this.localAnalyser = null;
+
         /** @type {Map<string, GainNode>} */
         this.participantGains = new Map();
+        /** @type {Map<string, AnalyserNode>} Анализаторы для каждого удаленного собеседника */
+        this.participantAnalysers = new Map();
         /** @type {Map<string, number>} */
         this.participantVolumes = new Map();
 
-        /** @type {Map<string, number>} Независимые таймлайны воспроизведения для каждого участника */
+        /** @type {Map<string, number>} Независимые таймлайны воспроизведения */
         this.speakerPlayTimes = new Map();
 
         this.masterVolume = 1.0;
@@ -51,7 +57,7 @@ class AudioManager {
     }
 
     /**
-     * Инициализация AudioContext и регистрация Worklet
+     * Инициализация AudioContext и загрузка Worklet
      * @returns {Promise<void>}
      */
     async init() {
@@ -78,7 +84,7 @@ class AudioManager {
     }
 
     /**
-     * Захват аудио с микрофона и запуск аудиоворклета
+     * Захват аудио с микрофона и подключение AnalyserNode
      * @param {boolean} echoCancellation
      * @returns {Promise<void>}
      */
@@ -101,6 +107,11 @@ class AudioManager {
             this.sourceNode = this.audioContext.createMediaStreamSource(this.microphoneStream);
             this.workletNode = new AudioWorkletNode(this.audioContext, 'voice-capture-processor');
 
+            // Создаем анализатор для визуализации собственного голоса
+            this.localAnalyser = this.audioContext.createAnalyser();
+            this.localAnalyser.fftSize = 64;
+            this.localAnalyser.smoothingTimeConstant = 0.8;
+
             this.workletNode.port.onmessage = (event) => {
                 if (!this.isRecording || this.isMuted) return;
 
@@ -112,7 +123,9 @@ class AudioManager {
                 this._calculateVAD(pcmBuffer, 'self');
             };
 
+            this.sourceNode.connect(this.localAnalyser);
             this.sourceNode.connect(this.workletNode);
+
             this.isRecording = true;
             this.setMute(this.isMuted);
         } catch (err) {
@@ -123,7 +136,7 @@ class AudioManager {
     }
 
     /**
-     * Остановка микрофона
+     * Остановка захвата микрофона
      */
     stopMicrophone() {
         if (this.workletNode) {
@@ -132,6 +145,13 @@ class AudioManager {
                 this.workletNode.disconnect();
             } catch (e) { }
             this.workletNode = null;
+        }
+
+        if (this.localAnalyser) {
+            try {
+                this.localAnalyser.disconnect();
+            } catch (e) { }
+            this.localAnalyser = null;
         }
 
         if (this.sourceNode) {
@@ -180,21 +200,19 @@ class AudioManager {
 
     /**
      * Воспроизведение входящего бинарного пакета от сервера.
-     * Каждый участник воспроизводится ПАРАЛЛЕЛЬНО и независимо.
      * @param {ArrayBuffer} arrayBuffer
      */
     playAudioPacket(arrayBuffer) {
         if (!this.audioContext || arrayBuffer.byteLength < 4) return;
 
         const view = new DataView(arrayBuffer);
-        const idLen = view.getUint16(0, false); // Big-Endian uint16
+        const idLen = view.getUint16(0, false);
         let pcmOffset = 0;
         let speakerId = 'default_stream';
 
         if (idLen > 0 && arrayBuffer.byteLength >= 2 + idLen + 2) {
             const idBytes = new Uint8Array(arrayBuffer, 2, idLen);
             speakerId = new TextDecoder().decode(idBytes);
-            // 2-byte alignment padding от Go-сервера
             pcmOffset = 2 + idLen + (idLen % 2 !== 0 ? 1 : 0);
         } else {
             pcmOffset = 0;
@@ -214,7 +232,6 @@ class AudioManager {
             energySum += s * s;
         }
 
-        // Индикация речи собеседника
         if (speakerId !== 'default_stream' && typeof this.onSpeakingStateChange === 'function') {
             const rms = Math.sqrt(energySum / sampleCount);
             this.onSpeakingStateChange(speakerId, rms > 0.012);
@@ -226,23 +243,18 @@ class AudioManager {
         const sourceNode = this.audioContext.createBufferSource();
         sourceNode.buffer = audioBuffer;
 
-        // Персональный GainNode для регулировки громкости конкретного человека
+        // Маршрутизация через персональный AnalyserNode и GainNode
         const targetGain = this._getParticipantGainNode(speakerId);
         sourceNode.connect(targetGain);
 
-        // =====================================================================
-        // Изолированный джиттер-буфер для КОНКРЕТНОГО участника
-        // =====================================================================
+        // Индивидуальный джиттер-буфер для собеседника
         const currentTime = this.audioContext.currentTime;
         const jitterOffset = this.jitterBufferMs / 1000.0;
         let nextPlayTime = this.speakerPlayTimes.get(speakerId) || 0;
 
-        // Если поток прерывался или еще не начался
         if (nextPlayTime < currentTime) {
             nextPlayTime = currentTime + jitterOffset;
-        }
-        // Если накопилось слишком большое отставание (более 150 мс), сбрасываем буфер
-        else if (nextPlayTime > currentTime + this.maxDriftSec) {
+        } else if (nextPlayTime > currentTime + this.maxDriftSec) {
             nextPlayTime = currentTime + jitterOffset;
         }
 
@@ -251,7 +263,7 @@ class AudioManager {
     }
 
     /**
-     * Получение или создание GainNode участника
+     * Получение или создание GainNode и AnalyserNode для участника
      * @private
      * @param {string} speakerId
      * @returns {GainNode}
@@ -266,14 +278,44 @@ class AudioManager {
             gainNode = this.audioContext.createGain();
             const volume = this.participantVolumes.get(speakerId) ?? 1.0;
             gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
-            gainNode.connect(this.masterGain);
+
+            // Создаем анализатор для спектральной визуализации собеседника
+            const analyser = this.audioContext.createAnalyser();
+            analyser.fftSize = 64;
+            analyser.smoothingTimeConstant = 0.8;
+
+            gainNode.connect(analyser);
+            analyser.connect(this.masterGain);
+
             this.participantGains.set(speakerId, gainNode);
+            this.participantAnalysers.set(speakerId, analyser);
         }
         return gainNode;
     }
 
     /**
-     * Индивидуальная громкость участника
+     * Получение частотных данных (FFT) для отрисовки анимации волны / спектра
+     * @param {string} userId ID пользователя или 'self' для микрофона
+     * @returns {Uint8Array|null} Массив амплитуд частот [0..255]
+     */
+    getFrequencyData(userId) {
+        let analyser = null;
+        if (userId === 'self') {
+            analyser = this.localAnalyser;
+            if (this.isMuted) return null;
+        } else {
+            analyser = this.participantAnalysers.get(userId);
+        }
+
+        if (!analyser) return null;
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        analyser.getByteFrequencyData(dataArray);
+        return dataArray;
+    }
+
+    /**
+     * Установка громкости отдельного участника
      * @param {string} userId
      * @param {number} volume [0.0 ... 2.0]
      */
@@ -288,7 +330,7 @@ class AudioManager {
     }
 
     /**
-     * Мастер-громкость
+     * Установка мастер-громкости
      * @param {number} volume [0.0 ... 2.0]
      */
     setMasterVolume(volume) {
@@ -299,10 +341,18 @@ class AudioManager {
     }
 
     /**
-     * Очистка ресурсов участника при его выходе
+     * Очистка ресурсов участника при выходе
      * @param {string} userId
      */
     removeParticipant(userId) {
+        const analyser = this.participantAnalysers.get(userId);
+        if (analyser) {
+            try {
+                analyser.disconnect();
+            } catch (e) { }
+            this.participantAnalysers.delete(userId);
+        }
+
         const gainNode = this.participantGains.get(userId);
         if (gainNode) {
             try {
@@ -310,15 +360,23 @@ class AudioManager {
             } catch (e) { }
             this.participantGains.delete(userId);
         }
+
         this.participantVolumes.delete(userId);
         this.speakerPlayTimes.delete(userId);
     }
 
     /**
-     * Полное уничтожение контекста
+     * Полное уничтожение аудиоконтекста
      */
     async destroy() {
         this.stopMicrophone();
+
+        this.participantAnalysers.forEach((analyser) => {
+            try {
+                analyser.disconnect();
+            } catch (e) { }
+        });
+        this.participantAnalysers.clear();
 
         this.participantGains.forEach((gain) => {
             try {
@@ -361,5 +419,5 @@ class AudioManager {
     }
 }
 
-// Глобальный экземпляр
+// Глобальный инстанс
 window.audioManager = new AudioManager();
