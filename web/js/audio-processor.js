@@ -9,34 +9,56 @@ class NeuralAudioProcessor {
     async init() {
         if (this.isInitialized) return true;
         if (this.initPromise) return this.initPromise;
-
+        
         this.initPromise = this._loadRNNoise();
         return this.initPromise;
     }
 
     async _loadRNNoise() {
         try {
-            // Загружаем синхронную версию RNNoise (проще в использовании)
-            const script = document.createElement('script');
-            script.src = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-sync.js';
-            document.head.appendChild(script);
-
-            await new Promise((resolve, reject) => {
-                script.onload = resolve;
-                script.onerror = () => reject(new Error('Failed to load RNNoise script'));
-                setTimeout(() => reject(new Error('RNNoise script timeout')), 10000);
-            });
-
-            // Проверяем, что RNNoise доступен
-            if (!window.RNNoise) {
-                throw new Error('RNNoise not found in window');
+            // Загружаем RNNoise как ES модуль через import()
+            const module = await import('https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-sync.js');
+            
+            let RNNoiseClass;
+            
+            // Проверяем разные варианты экспорта
+            if (module.default) {
+                RNNoiseClass = module.default;
+            } else if (module.RNNoise) {
+                RNNoiseClass = module.RNNoise;
+            } else {
+                // Ищем в самом модуле
+                for (const key in module) {
+                    if (typeof module[key] === 'function' || typeof module[key] === 'object') {
+                        RNNoiseClass = module[key];
+                        break;
+                    }
+                }
             }
-
-            // Создаём денойзер
-            this.denoiser = new window.RNNoise();
-
+            
+            if (!RNNoiseClass) {
+                throw new Error('RNNoise class not found in module');
+            }
+            
+            // Создаём экземпляр
+            if (typeof RNNoiseClass === 'function') {
+                this.denoiser = new RNNoiseClass();
+            } else if (typeof RNNoiseClass === 'object') {
+                this.denoiser = RNNoiseClass;
+            } else {
+                throw new Error('Cannot instantiate RNNoise');
+            }
+            
+            // Проверяем, что денойзер имеет метод process или filter
+            if (typeof this.denoiser.process !== 'function' && 
+                typeof this.denoiser.filter !== 'function' &&
+                typeof this.denoiser !== 'function') {
+                console.warn('RNNoise denoiser methods:', Object.keys(this.denoiser));
+            }
+            
             this.isInitialized = true;
             console.log('✅ RNNoise initialized successfully');
+            console.log('Denoiser methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(this.denoiser)));
             return true;
         } catch (error) {
             console.warn('⚠️ RNNoise initialization failed:', error.message);
@@ -50,7 +72,7 @@ class NeuralAudioProcessor {
         if (!this.denoiser || !this.isInitialized) {
             return float32Array;
         }
-
+        
         try {
             // Конвертируем Float32 в Int16
             const pcm16 = new Int16Array(float32Array.length);
@@ -58,19 +80,17 @@ class NeuralAudioProcessor {
                 const s = Math.max(-1, Math.min(1, float32Array[i]));
                 pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
             }
-
-            // RNNoise обрабатывает кадры по 480 сэмплов
+            
             const frameSize = 480;
             const output = new Float32Array(float32Array.length);
-
+            
             for (let i = 0; i < pcm16.length; i += frameSize) {
                 const chunk = pcm16.slice(i, i + frameSize);
-
+                
                 if (chunk.length === frameSize) {
                     let denoised = null;
-
+                    
                     try {
-                        // Пробуем разные методы обработки
                         if (typeof this.denoiser.process === 'function') {
                             denoised = this.denoiser.process(chunk);
                         } else if (typeof this.denoiser.filter === 'function') {
@@ -79,9 +99,10 @@ class NeuralAudioProcessor {
                             denoised = this.denoiser(chunk);
                         }
                     } catch (e) {
+                        console.warn('RNNoise frame processing error:', e);
                         denoised = chunk;
                     }
-
+                    
                     if (denoised) {
                         for (let j = 0; j < chunk.length; j++) {
                             output[i + j] = denoised[j] / 32768.0;
@@ -97,7 +118,7 @@ class NeuralAudioProcessor {
                     }
                 }
             }
-
+            
             return output;
         } catch (e) {
             console.warn('RNNoise processing failed:', e);
