@@ -16,29 +16,24 @@ class NeuralAudioProcessor {
 
     async _loadRNNoise() {
         try {
-            // Загружаем RNNoise как ES модуль через import()
-            const module = await import('https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-wasm.js');
+            // Загружаем синхронную версию RNNoise (проще в использовании)
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-sync.js';
+            document.head.appendChild(script);
 
-            let rnnoiseModule = module.default || module;
+            await new Promise((resolve, reject) => {
+                script.onload = resolve;
+                script.onerror = () => reject(new Error('Failed to load RNNoise script'));
+                setTimeout(() => reject(new Error('RNNoise script timeout')), 10000);
+            });
 
-            // Создаём экземпляр RNNoise
-            let rnnoise;
-            if (typeof rnnoiseModule === 'function') {
-                rnnoise = await rnnoiseModule();
-            } else if (rnnoiseModule.create) {
-                rnnoise = await rnnoiseModule.create();
-            } else {
-                rnnoise = rnnoiseModule;
+            // Проверяем, что RNNoise доступен
+            if (!window.RNNoise) {
+                throw new Error('RNNoise not found in window');
             }
 
             // Создаём денойзер
-            if (rnnoise && typeof rnnoise.createDenoiser === 'function') {
-                this.denoiser = await rnnoise.createDenoiser();
-            } else if (rnnoise && rnnoise.Denoiser) {
-                this.denoiser = new rnnoise.Denoiser();
-            } else {
-                throw new Error('Denoiser not found');
-            }
+            this.denoiser = new window.RNNoise();
 
             this.isInitialized = true;
             console.log('✅ RNNoise initialized successfully');
@@ -57,7 +52,7 @@ class NeuralAudioProcessor {
         }
 
         try {
-            // Конвертируем Float32 в Int16 (RNNoise работает с PCM 16-bit)
+            // Конвертируем Float32 в Int16
             const pcm16 = new Int16Array(float32Array.length);
             for (let i = 0; i < float32Array.length; i++) {
                 const s = Math.max(-1, Math.min(1, float32Array[i]));
@@ -75,13 +70,15 @@ class NeuralAudioProcessor {
                     let denoised = null;
 
                     try {
+                        // Пробуем разные методы обработки
                         if (typeof this.denoiser.process === 'function') {
                             denoised = this.denoiser.process(chunk);
+                        } else if (typeof this.denoiser.filter === 'function') {
+                            denoised = this.denoiser.filter(chunk);
                         } else if (typeof this.denoiser === 'function') {
                             denoised = this.denoiser(chunk);
                         }
                     } catch (e) {
-                        // Ошибка обработки — используем оригинал
                         denoised = chunk;
                     }
 
@@ -95,7 +92,6 @@ class NeuralAudioProcessor {
                         }
                     }
                 } else {
-                    // Неполный кадр — копируем как есть
                     for (let j = 0; j < chunk.length; j++) {
                         output[i + j] = chunk[j] / 32768.0;
                     }
