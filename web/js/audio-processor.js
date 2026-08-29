@@ -17,7 +17,7 @@ class NeuralAudioProcessor {
     async _loadRNNoise() {
         try {
             // Загружаем RNNoise как ES модуль через import()
-            const module = await import('https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.3.0/dist/rnnoise-wasm.js');
+            const module = await import('https://cdn.jsdelivr.net/npm/@jitsi/rnnoise-wasm@0.2.1/dist/rnnoise-wasm.js');
 
             let rnnoiseModule = module.default || module;
 
