@@ -79,18 +79,16 @@ class AudioManager {
      */
     async startMicrophone(enableEchoCancellation = false) {
         await this.init();
-
-        if (this.micStream) {
-            this.stopMicrophone();
-        }
+        if (this.micStream) this.stopMicrophone();
 
         const constraints = {
             audio: {
                 echoCancellation: enableEchoCancellation,
-                noiseSuppression: false, // Noise-Gate и VAD работают на Go-сервере
-                autoGainControl: false,  // AGC работает на сервере
+                noiseSuppression: false,
+                autoGainControl: false,
                 channelCount: 1,
-                sampleRate: 48000
+                sampleRate: 48000,
+                latency: 0.01 // Запрос минимальной аппаратной задержки
             },
             video: false
         };
@@ -99,13 +97,11 @@ class AudioManager {
             this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
             this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-            // Инициализация собственного анализатора спектра для визуализатора
             this.selfAnalyser = this.audioCtx.createAnalyser();
             this.selfAnalyser.fftSize = 64;
-            this.selfAnalyser.smoothingTimeConstant = 0.4;
+            this.selfAnalyser.smoothingTimeConstant = 0.3;
             this.micSourceNode.connect(this.selfAnalyser);
 
-            // Создание ноды AudioWorklet
             this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture-processor');
             this.workletNode.port.onmessage = (event) => {
                 if (event.data && this.onAudioFrame && !this.isMuted) {
@@ -114,8 +110,6 @@ class AudioManager {
             };
 
             this.micSourceNode.connect(this.workletNode);
-
-            // Запуск детекции речи локального микрофона
             this.startLocalVAD();
         } catch (err) {
             console.error('[AudioManager] getUserMedia error:', err);
@@ -199,39 +193,31 @@ class AudioManager {
      * Формат пакета: [uint16 userIdLen][userId bytes][padding?][int16 PCM...]
      */
     playAudioPacket(arrayBuffer) {
-        if (!this.audioCtx || this.audioCtx.state === 'suspended') {
-            return;
-        }
+        if (!this.audioCtx || this.audioCtx.state === 'suspended') return;
 
         const dataView = new DataView(arrayBuffer);
         if (dataView.byteLength < 4) return;
 
-        // 1. Чтение UserID
-        const userIdLen = dataView.getUint16(0, false); // BigEndian
+        const userIdLen = dataView.getUint16(0, false);
         const userIdOffset = 2;
         if (dataView.byteLength < userIdOffset + userIdLen) return;
 
         const userIdBytes = new Uint8Array(arrayBuffer, userIdOffset, userIdLen);
         const userId = this.textDecoder.decode(userIdBytes);
 
-        // Выравнивание PCM сэмплов
         let pcmOffset = userIdOffset + userIdLen;
-        if (userIdLen % 2 !== 0) {
-            pcmOffset += 1;
-        }
+        if (userIdLen % 2 !== 0) pcmOffset += 1;
 
         const pcmBytesLen = dataView.byteLength - pcmOffset;
         const sampleCount = pcmBytesLen / 2;
         if (sampleCount <= 0) return;
 
-        // 2. Преобразование LittleEndian Int16 в Float32 (-1.0 ... 1.0)
         const floatSamples = new Float32Array(sampleCount);
         for (let i = 0; i < sampleCount; i++) {
             const int16 = dataView.getInt16(pcmOffset + i * 2, true);
             floatSamples[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        // 3. Создание AudioBuffer с исходным квантом 16 кГц
         const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
         audioBuffer.copyToChannel(floatSamples, 0);
 
@@ -240,21 +226,18 @@ class AudioManager {
         sourceNode.buffer = audioBuffer;
         sourceNode.connect(pipeline.gainNode);
 
-        // 4. Sample-Accurate Timeline Scheduling (Борьба с джиттером и накоплением задержки)
+        // Ультранизкая задержка: буфер держится в диапазоне 20-60 мс
         const now = this.audioCtx.currentTime;
-        const safetyLeadTime = 0.025; // 25 мс буфер безопасности
+        const minLead = 0.020; // 20 мс
+        const maxLead = 0.060; // 60 мс максимум
 
-        if (pipeline.nextPlayTime < now) {
-            pipeline.nextPlayTime = now + safetyLeadTime;
-        } else if (pipeline.nextPlayTime > now + 0.150) {
-            // Если очередь превысила 150 мс из-за лага сети, сбрасываем timeline
-            pipeline.nextPlayTime = now + safetyLeadTime;
+        if (pipeline.nextPlayTime < now || pipeline.nextPlayTime > now + maxLead) {
+            pipeline.nextPlayTime = now + minLead;
         }
 
         sourceNode.start(pipeline.nextPlayTime);
         pipeline.nextPlayTime += audioBuffer.duration;
 
-        // 5. Детекция активности голоса для анимации карточки в UI
         this.triggerParticipantVAD(userId, pipeline);
     }
 

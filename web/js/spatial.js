@@ -1,14 +1,14 @@
 /**
- * VoiceChat 3D Spatial & Environment Engine - web/js/spatial.js
- * Optimized for Safari/WebKit & Chrome: HRTF Panning, Yaw/Pitch Orientation, Cave Reverb & Radio Fallback.
+ * VoiceChat 3D Spatial Engine - web/js/spatial.js
+ * Relative Local-Space HRTF Panning (100% compatible with Safari WebKit & Chrome)
  */
 
 class SpatialAudioEngine {
     constructor(audioManager) {
         this.am = audioManager;
-        this.maxProximityDistance = 32.0; // Максимальная дистанция 3D звука (блоков)
-        this.listenerPos = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, inCave: false, matched: false };
-        this.chains = new Map(); // userId -> SpatialChain
+        this.maxDistance = 32.0; // Максимальная дистанция слышимости (блоков)
+        this.listenerPos = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, inCave: false };
+        this.chains = new Map(); // userId -> chain
         this.caveConvolver = null;
         this.isInitialized = false;
     }
@@ -16,60 +16,68 @@ class SpatialAudioEngine {
     init() {
         if (!this.am.audioCtx || this.isInitialized) return;
 
-        // Создаем процедурный импульс эха пещеры (2.0 сек)
+        // Фиксируем слушателя строго в центре (0, 0, 0) лицом вперед (-Z)
+        const listener = this.am.audioCtx.listener;
+        if (listener.positionX) {
+            listener.positionX.value = 0;
+            listener.positionY.value = 0;
+            listener.positionZ.value = 0;
+            listener.forwardX.value = 0;
+            listener.forwardY.value = 0;
+            listener.forwardZ.value = -1;
+            listener.upX.value = 0;
+            listener.upY.value = 1;
+            listener.upZ.value = 0;
+        } else if (listener.setPosition) {
+            listener.setPosition(0, 0, 0);
+            listener.setOrientation(0, 0, -1, 0, 1, 0);
+        }
+
+        // Процедурный реверб пещеры
         this.caveConvolver = this.am.audioCtx.createConvolver();
-        this.caveConvolver.buffer = this.generateCaveImpulseResponse(1.8, 2.2);
+        this.caveConvolver.buffer = this.generateCaveIR(1.5, 2.0);
 
         this.isInitialized = true;
-        console.log('[SpatialAudio] Engine initialized successfully.');
     }
 
-    generateCaveImpulseResponse(duration, decay) {
-        const sampleRate = this.am.audioCtx.sampleRate;
-        const length = sampleRate * duration;
-        const impulse = this.am.audioCtx.createBuffer(2, length, sampleRate);
-        const left = impulse.getChannelData(0);
-        const right = impulse.getChannelData(1);
-
-        for (let i = 0; i < length; i++) {
-            const n = i / length;
-            const env = Math.pow(1 - n, decay);
-            left[i] = (Math.random() * 2 - 1) * env;
-            right[i] = (Math.random() * 2 - 1) * env;
+    generateCaveIR(duration, decay) {
+        const rate = this.am.audioCtx.sampleRate;
+        const len = rate * duration;
+        const buf = this.am.audioCtx.createBuffer(2, len, rate);
+        const l = buf.getChannelData(0);
+        const r = buf.getChannelData(1);
+        for (let i = 0; i < len; i++) {
+            const env = Math.pow(1 - i / len, decay);
+            l[i] = (Math.random() * 2 - 1) * env;
+            r[i] = (Math.random() * 2 - 1) * env;
         }
-        return impulse;
+        return buf;
     }
 
     createSpatialChain(userId, sourceGainNode, destinationNode) {
         if (!this.isInitialized) this.init();
         const ctx = this.am.audioCtx;
 
-        // 3D Panner с агрессивной кривой для четкого разделения лево/право
         const panner = ctx.createPanner();
         panner.panningModel = 'HRTF';
         panner.distanceModel = 'inverse';
         panner.refDistance = 1.5;
-        panner.maxDistance = this.maxProximityDistance;
-        panner.rolloffFactor = 1.0;
-        panner.coneInnerAngle = 360;
+        panner.maxDistance = this.maxDistance;
+        panner.rolloffFactor = 1.2;
 
         const directGain = ctx.createGain();
-        directGain.gain.setValueAtTime(1.0, ctx.currentTime);
+        directGain.gain.value = 1.0;
 
         const reverbGain = ctx.createGain();
-        reverbGain.gain.setValueAtTime(0.0, ctx.currentTime);
+        reverbGain.gain.value = 0.0;
 
-        // Радио-фильтр для дальней дистанции
-        const radioHP = ctx.createBiquadFilter();
-        radioHP.type = 'highpass';
-        radioHP.frequency.value = 450;
-
-        const radioLP = ctx.createBiquadFilter();
-        radioLP.type = 'lowpass';
-        radioLP.frequency.value = 2500;
+        const radioFilter = ctx.createBiquadFilter();
+        radioFilter.type = 'bandpass';
+        radioFilter.frequency.value = 1400;
+        radioFilter.Q.value = 1.5;
 
         const radioGain = ctx.createGain();
-        radioGain.gain.setValueAtTime(0.0, ctx.currentTime);
+        radioGain.gain.value = 0.0;
 
         // Коммутация графа
         sourceGainNode.connect(panner);
@@ -82,119 +90,73 @@ class SpatialAudioEngine {
             this.caveConvolver.connect(destinationNode);
         }
 
-        sourceGainNode.connect(radioHP);
-        radioHP.connect(radioLP);
-        radioLP.connect(radioGain);
+        // Обходной радио-канал для больших расстояний
+        sourceGainNode.connect(radioFilter);
+        radioFilter.connect(radioGain);
         radioGain.connect(destinationNode);
 
-        const chain = {
-            panner,
-            directGain,
-            reverbGain,
-            radioGain,
-            lastPos: { x: 0, y: 0, z: 0, dimension: 0, inCave: false, dist: 0 }
-        };
-
+        const chain = { panner, directGain, reverbGain, radioGain };
         this.chains.set(userId, chain);
-        console.log(`[SpatialAudio] Created 3D chain for user: ${userId}`);
         return chain;
     }
 
-    /**
-     * Позиционирование слушателя (с поддержкой Safari WebKit)
-     */
     updateListener(x, y, z, yaw, pitch, inCave) {
-        if (!this.am.audioCtx) return;
-        const ctx = this.am.audioCtx;
-        const listener = ctx.listener;
-
-        this.listenerPos = { x, y, z, yaw, pitch, inCave, matched: true };
-
-        // 1. Позиция слушателя (совместимо со всеми браузерами)
-        if (listener.positionX) {
-            listener.positionX.value = x;
-            listener.positionY.value = y;
-            listener.positionZ.value = z;
-        }
-        if (listener.setPosition) {
-            listener.setPosition(x, y, z);
-        }
-
-        // 2. Вектор направления взгляда в Minecraft (Yaw 0 = +Z South, 90 = -X West)
-        const yawRad = yaw * (Math.PI / 180.0);
-        const pitchRad = pitch * (Math.PI / 180.0);
-
-        const cosPitch = Math.cos(pitchRad);
-        const fwdX = -Math.sin(yawRad) * cosPitch;
-        const fwdY = -Math.sin(pitchRad);
-        const fwdZ = Math.cos(yawRad) * cosPitch;
-
-        const upX = 0;
-        const upY = 1;
-        const upZ = 0;
-
-        if (listener.forwardX) {
-            listener.forwardX.value = fwdX;
-            listener.forwardY.value = fwdY;
-            listener.forwardZ.value = fwdZ;
-            listener.upX.value = upX;
-            listener.upY.value = upY;
-            listener.upZ.value = upZ;
-        }
-        if (listener.setOrientation) {
-            listener.setOrientation(fwdX, fwdY, fwdZ, upX, upY, upZ);
-        }
+        this.listenerPos = { x, y, z, yaw, pitch, inCave };
     }
 
     /**
-     * Позиционирование источника звука собеседника
+     * Преобразование глобальных координат Minecraft в локальные координаты ушей игрока
      */
-    updateRemotePlayer(userId, x, y, z, dimension, inCave) {
+    updateRemotePlayer(userId, targetX, targetY, targetZ, dimension, inCave) {
         let chain = this.chains.get(userId);
-
-        // Если цепочка еще не была создана, запрашиваем ноду у аудио-менеджера
         if (!chain && this.am) {
-            const pipeline = this.am.getParticipantPipeline(userId);
+            this.am.getParticipantPipeline(userId);
             chain = this.chains.get(userId);
         }
-
         if (!chain || !this.am.audioCtx) return;
 
-        const ctx = this.am.audioCtx;
-        const now = ctx.currentTime;
+        const now = this.am.audioCtx.currentTime;
 
-        const dx = x - this.listenerPos.x;
-        const dy = y - this.listenerPos.y;
-        const dz = z - this.listenerPos.z;
+        // Вектор смещения в мире
+        const dx = targetX - this.listenerPos.x;
+        const dy = targetY - this.listenerPos.y;
+        const dz = targetZ - this.listenerPos.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-        chain.lastPos = { x, y, z, dimension, inCave, dist };
-
-        const isDifferentDim = this.listenerPos.matched && (dimension !== this.listenerPos.dimension);
-
-        if (isDifferentDim || dist > this.maxProximityDistance) {
-            // Режим рации при удалении или в другом измерении
+        if (dist > this.maxDistance) {
+            // Переход на рацию при удалении
             chain.directGain.gain.setValueAtTime(0.0, now);
             chain.reverbGain.gain.setValueAtTime(0.0, now);
             chain.radioGain.gain.setTargetAtTime(0.9, now, 0.05);
-        } else {
-            // 3D звук
-            chain.radioGain.gain.setValueAtTime(0.0, now);
-            chain.directGain.gain.setTargetAtTime(1.0, now, 0.05);
-
-            if (chain.panner.positionX) {
-                chain.panner.positionX.value = x;
-                chain.panner.positionY.value = y;
-                chain.panner.positionZ.value = z;
-            }
-            if (chain.panner.setPosition) {
-                chain.panner.setPosition(x, y, z);
-            }
-
-            // Эхо пещеры
-            const reverbLevel = (inCave || this.listenerPos.inCave) ? 0.5 : 0.0;
-            chain.reverbGain.gain.setTargetAtTime(reverbLevel, now, 0.1);
+            return;
         }
+
+        chain.radioGain.gain.setValueAtTime(0.0, now);
+        chain.directGain.gain.setTargetAtTime(1.0, now, 0.05);
+
+        // Проекция в систему координат головы (Minecraft Yaw: 0 = +Z, 90 = -X)
+        const yawRad = this.listenerPos.yaw * (Math.PI / 180.0);
+        const cosY = Math.cos(yawRad);
+        const sinY = Math.sin(yawRad);
+
+        // relX: <0 (слева), >0 (справа)
+        // relZ: <0 (спереди), >0 (сзади)
+        const relX = -(dx * cosY + dz * sinY);
+        const relY = dy;
+        const relZ = -(-dx * sinY + dz * cosY);
+
+        // Применяем относительные координаты к PannerNode
+        if (chain.panner.positionX) {
+            chain.panner.positionX.setTargetAtTime(relX, now, 0.04);
+            chain.panner.positionY.setTargetAtTime(relY, now, 0.04);
+            chain.panner.positionZ.setTargetAtTime(relZ, now, 0.04);
+        } else if (chain.panner.setPosition) {
+            chain.panner.setPosition(relX, relY, relZ);
+        }
+
+        // Эхо пещеры
+        const reverbVal = (inCave || this.listenerPos.inCave) ? 0.45 : 0.0;
+        chain.reverbGain.gain.setTargetAtTime(reverbVal, now, 0.1);
     }
 
     removeChain(userId) {
