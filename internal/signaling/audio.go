@@ -8,19 +8,19 @@ import (
 
 const (
 	// Аудио спецификация
-	SampleRate      = 16000 // 16 kHz: стандарт для передачи голоса
-	FrameDurationMs = 20    // 20 мс квант аудио
-	SamplesPerFrame = 320   // 16000 * 0.02 = 320 сэмплов
-	BytesPerFrame   = 640   // 320 сэмплов * 2 байта (Int16)
-	MaxSenderIDLen  = 128   // Максимальная длина ID для заголовка пакета
+	SampleRate      = 16000 // 16 kHz
+	FrameDurationMs = 20    // 20 мс
+	SamplesPerFrame = 320   // 320 сэмплов
+	BytesPerFrame   = 640   // 640 байт
+	MaxSenderIDLen  = 128
 
-	// Базовые параметры DSP
-	HighPassCutoffFreq = 80.0  // Частота среза High-Pass фильтра в Гц
-	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
-	VADEnergyThreshold = 0.002 // Порог RMS детекции голоса
-	VADHangoverFrames  = 20    // Удержание VAD (20 фреймов = 400 мс)
-	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
-	MaxGainMultiplier  = 3.5   // Максимальное усиление слабого сигнала
+	// DSP и шумоподавление
+	HighPassCutoffFreq = 120.0 // Срезаем низкочастотный гул кулера (до 120 Гц)
+	HighPassQ          = 0.707
+	VADEnergyThreshold = 0.006 // Порог речи (отсекает тихий шум вентилятора)
+	VADHangoverFrames  = 25    // Удержание хвоста речи (25 фреймов = 500 мс без стробирования)
+	TargetRMS          = 0.12  // Целевой уровень AGC
+	MaxGainMultiplier  = 2.2   // Ограничение усиления фонового шума
 )
 
 // =============================================================================
@@ -171,17 +171,17 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 1. High-Pass фильтрация
+	// 1. High-Pass фильтрация гула
 	p.hpFilter.Process(samples, samples)
 
-	// 2. Расчет среднеквадратичной энергии (RMS)
+	// 2. Расчет энергии RMS
 	var sum float32
 	for i := 0; i < n; i++ {
 		sum += samples[i] * samples[i]
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. VAD с удержанием хвостов
+	// 3. Двухуровневый VAD с защитой от стробирования
 	if rms >= VADEnergyThreshold {
 		p.hangoverCount = VADHangoverFrames
 		p.isSpeaking = true
@@ -193,24 +193,25 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		for i := 0; i < n; i++ {
 			samples[i] = 0
 		}
+		p.currentGain = 1.0
 		return false
 	}
 
 	// 4. Применение голосовых эффектов
 	p.applyVoiceEffects(samples)
 
-	// 5. AGC
-	if rms > 0.001 {
+	// 5. AGC (без чрезмерного разгона шума)
+	if rms > 0.005 {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
 			desiredGain = MaxGainMultiplier
-		} else if desiredGain < 0.5 {
-			desiredGain = 0.5
+		} else if desiredGain < 0.6 {
+			desiredGain = 0.6
 		}
-		p.currentGain = p.currentGain*0.9 + desiredGain*0.1
+		p.currentGain = p.currentGain*0.92 + desiredGain*0.08
 	}
 
-	// 6. Усиление и Soft Limiting
+	// 6. Усиление и мягкий лимитер
 	for i := 0; i < n; i++ {
 		val := samples[i] * p.currentGain
 		if val > 1.0 {

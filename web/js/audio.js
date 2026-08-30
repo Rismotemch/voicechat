@@ -226,13 +226,15 @@ class AudioManager {
         sourceNode.buffer = audioBuffer;
         sourceNode.connect(pipeline.gainNode);
 
-        // Ультранизкая задержка: буфер держится в диапазоне 20-60 мс
+        // Стабильный адаптивный джиттер-буфер 45-50мс (без разрывов и щелчков)
         const now = this.audioCtx.currentTime;
-        const minLead = 0.020; // 20 мс
-        const maxLead = 0.060; // 60 мс максимум
+        const targetLead = 0.045; // 45 мс буфер безопасности
+        const maxLead = 0.120;    // Лимит накопления до сброса (120 мс)
 
-        if (pipeline.nextPlayTime < now || pipeline.nextPlayTime > now + maxLead) {
-            pipeline.nextPlayTime = now + minLead;
+        if (pipeline.nextPlayTime < now) {
+            pipeline.nextPlayTime = now + targetLead;
+        } else if (pipeline.nextPlayTime > now + maxLead) {
+            pipeline.nextPlayTime = now + targetLead;
         }
 
         sourceNode.start(pipeline.nextPlayTime);
