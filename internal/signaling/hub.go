@@ -406,6 +406,21 @@ func (c *Client) handleTextMessage(data []byte) {
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
 			c.handleLeave(p)
 		}
+	case "ptt_state":
+		var p struct {
+			UserName  string `json:"userName"`
+			IsPressed bool   `json:"isPressed"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			c.Hub.mu.RLock()
+			// Пересылаем команду браузеру пользователя, чтобы он открыл/закрыл поток
+			for _, cl := range c.Hub.clients {
+				if cl.User != nil && strings.EqualFold(cl.User.Name, p.UserName) {
+					cl.sendJSON("ptt_trigger", map[string]bool{"isPressed": p.IsPressed})
+				}
+			}
+			c.Hub.mu.RUnlock()
+		}
 	case "mute":
 		var p MuteMessage
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {

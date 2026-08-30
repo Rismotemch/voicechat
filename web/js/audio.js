@@ -193,6 +193,20 @@ class AudioManager {
     }
 
     /**
+     * Прямое управление передачей голоса для Push-to-Talk
+     */
+    setPttActive(isActive) {
+        if (!this.workletNode) return;
+        // Если PTT не зажат — глушим передачу в ворклете, иначе открываем
+        const shouldMute = !isActive;
+        this.workletNode.port.postMessage({ isMuted: shouldMute });
+
+        if (this.onSpeakingStateChange) {
+            this.onSpeakingStateChange('self', isActive);
+        }
+    }
+
+    /**
      * Переключение режима Mute
      */
     toggleMute() {

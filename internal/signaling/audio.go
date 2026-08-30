@@ -12,16 +12,13 @@ const (
 	FrameDurationMs = 20    // 20 мс квант аудио
 	SamplesPerFrame = 320   // 16000 * 0.02 = 320 сэмплов
 	BytesPerFrame   = 640   // 320 сэмплов * 2 байта (Int16)
-	MaxSenderIDLen  = 128   // Максимальная длина ID для заголовка пакета
+	MaxSenderIDLen  = 128   // Длина заголовка пакета
 
-	// Параметры фильтрации и гейта (откалиброваны для естественной речи)
-	HighPassCutoffFreq = 85.0   // 85 Гц сохраняет плотность голоса и разборчивость
-	HighPassQ          = 0.707  // Добротность фильтра Баттерворта
-	NoiseGateThreshold = 0.0035 // Мягкий порог (не срезает тихие согласные и шёпот)
-	SpeechThreshold    = 0.008  // Порог для работы AGC
-	VADHangoverFrames  = 28     // 560 мс удержание хвоста (окончания слов не глотаются)
-	TargetRMS          = 0.13   // Целевой уровень RMS для AGC
-	MaxGainMultiplier  = 2.2    // Максимальное адаптивное усиление
+	// DSP параметры (Открытый чистый поток без шумовых ворот)
+	HighPassCutoffFreq = 60.0  // Срезаем только инфразвук (<60 Гц), голос сохраняется полностью
+	HighPassQ          = 0.707 // Добротность Баттерворта
+	TargetRMS          = 0.12  // Целевой уровень громкости
+	MaxGainMultiplier  = 2.0   // Максимальное мягкое усиление
 )
 
 // =============================================================================
@@ -135,12 +132,10 @@ func (f *BiquadFilter) Reset() {
 // =============================================================================
 
 type AudioProcessor struct {
-	hpFilter      *BiquadFilter
-	hangoverCount int
-	isSpeaking    bool
-	currentGain   float32
-	gateEnvelope  float32
-	activeFilter  string
+	hpFilter     *BiquadFilter
+	isSpeaking   bool
+	currentGain  float32
+	activeFilter string
 
 	radioHPFilter *BiquadFilter
 	radioLPFilter *BiquadFilter
@@ -153,7 +148,6 @@ func NewAudioProcessor() *AudioProcessor {
 	return &AudioProcessor{
 		hpFilter:      newHighPassFilter(SampleRate, HighPassCutoffFreq, HighPassQ),
 		currentGain:   1.0,
-		gateEnvelope:  0.0,
 		activeFilter:  "none",
 		radioHPFilter: newHighPassFilter(SampleRate, 400.0, 0.707),
 		radioLPFilter: newLowPassFilter(SampleRate, 2600.0, 0.707),
@@ -172,7 +166,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 1. Мягкая High-Pass фильтрация инфранизкого гула
+	// 1. Фильтруем постоянную составляющую и инфразвуковой гул (<60 Гц)
 	p.hpFilter.Process(samples, samples)
 
 	// 2. Расчет энергии RMS
@@ -181,58 +175,25 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		sum += samples[i] * samples[i]
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
+	p.isSpeaking = (rms > 0.005)
 
-	// 3. VAD с продленным удержанием
-	var targetGate float32
-	if rms >= NoiseGateThreshold {
-		p.hangoverCount = VADHangoverFrames
-		p.isSpeaking = true
-		targetGate = 1.0
-	} else if p.hangoverCount > 0 {
-		p.hangoverCount--
-		p.isSpeaking = true
-		targetGate = 1.0
-	} else {
-		p.isSpeaking = false
-		targetGate = 0.0
-	}
-
-	// Сброс тишины при полном закрытии
-	if !p.isSpeaking && p.gateEnvelope < 0.005 {
-		p.gateEnvelope = 0.0
-		for i := 0; i < n; i++ {
-			samples[i] = 0
-		}
-		return false
-	}
-
-	// 4. AGC: адаптивное выравнивание громкости
-	if rms >= SpeechThreshold {
+	// 3. Мягкий AGC
+	if rms > 0.008 {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
 			desiredGain = MaxGainMultiplier
-		} else if desiredGain < 0.6 {
-			desiredGain = 0.6
+		} else if desiredGain < 0.7 {
+			desiredGain = 0.7
 		}
-		p.currentGain = p.currentGain*0.96 + desiredGain*0.04
+		p.currentGain = p.currentGain*0.97 + desiredGain*0.03
 	}
 
-	// 5. Применение голосовых фильтров
+	// 4. Применение голосовых эффектов
 	p.applyVoiceEffects(samples)
 
-	// 6. Быстрая атака (0 задержки на первые буквы) и плавный релиз
-	var envStep float32
-	if targetGate > p.gateEnvelope {
-		envStep = 0.35 // Мгновенное открытие на первый согласный
-	} else {
-		envStep = 0.015 // Очень плавное угасание хвоста
-	}
-
+	// 5. Усиление и Soft Limiter (без какого-либо гейта — поток всегда открыт)
 	for i := 0; i < n; i++ {
-		p.gateEnvelope += (targetGate - p.gateEnvelope) * envStep
-		val := samples[i] * p.currentGain * p.gateEnvelope
-
-		// Soft Limiter
+		val := samples[i] * p.currentGain
 		if val > 1.0 {
 			val = 1.0
 		} else if val < -1.0 {
@@ -243,6 +204,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		samples[i] = val
 	}
 
+	// ВСЕГДА возвращаем true: ни один квант звука не отбрасывается
 	return true
 }
 
@@ -309,10 +271,8 @@ func (p *AudioProcessor) Reset() {
 	p.radioLPFilter.Reset()
 	p.megaphoneBP.Reset()
 	p.demonLPFilter.Reset()
-	p.hangoverCount = 0
 	p.isSpeaking = false
 	p.currentGain = 1.0
-	p.gateEnvelope = 0.0
 	p.modPhase = 0
 }
 
@@ -416,10 +376,8 @@ func (h *AudioHub) ProcessAndBroadcast(senderID string, rawPCM []byte) {
 		floatBuf[i] = float32(rawSample) / 32768.0
 	}
 
-	hasVoice := sender.Processor.ProcessFrame(floatBuf[:sampleCount])
-	if !hasVoice {
-		return
-	}
+	// Обрабатываем фрейм (всегда передается дальше)
+	sender.Processor.ProcessFrame(floatBuf[:sampleCount])
 
 	userIDBytes := []byte(sender.UserID)
 	userIDLen := len(userIDBytes)

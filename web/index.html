@@ -130,6 +130,23 @@
             </div>
 
             <div class="settings-section">
+                <h4>Режим активации микрофона</h4>
+                <label for="activationModeSelect">Способ активации:</label>
+                <select id="activationModeSelect" class="custom-select">
+                    <option value="open">🎙️ Постоянно (Open Mic)</option>
+                    <option value="ptt">📻 По нажатию клавиши (Push-to-Talk)</option>
+                </select>
+            </div>
+
+            <div class="settings-section" id="pttKeybindSection" style="display: none;">
+                <label>Клавиша Push-to-Talk:</label>
+                <button type="button" id="pttKeybindBtn" class="secondary-btn" style="width: 100%; text-align: center;">
+                    Клавиша: <strong id="pttKeyLabel">V</strong> (нажмите для смены)
+                </button>
+                <small class="hint-text">*На смартфонах в этом режиме работает зажатие кнопки микрофона.</small>
+            </div>
+
+            <div class="settings-section">
                 <h4>Микрофон</h4>
                 <label for="micSensitivity">Чувствительность микрофона:</label>
                 <div class="range-wrapper">

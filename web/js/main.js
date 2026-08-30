@@ -41,6 +41,12 @@
         echoCancellationEnabled: false,
         masterVolume: 1.0,
         micSensitivity: 100,
+        // Настройки активации микрофона
+        activationMode: localStorage.getItem('voicechat_activation_mode') || 'open', // 'open' | 'ptt'
+        pttKey: localStorage.getItem('voicechat_ptt_key') || 'KeyV',
+        pttKeyLabel: localStorage.getItem('voicechat_ptt_key_label') || 'V',
+        isPttPressed: false,
+        isRecordingKeybind: false,
 
         // Комнаты и навигация
         selectedRoomId: 'main',
@@ -114,6 +120,10 @@
         masterVolume: document.getElementById('masterVolume'),
         masterVolumeValue: document.getElementById('masterVolumeValue'),
         echoCancellation: document.getElementById('echoCancellation'),
+        activationModeSelect: document.getElementById('activationModeSelect'),
+        pttKeybindSection: document.getElementById('pttKeybindSection'),
+        pttKeybindBtn: document.getElementById('pttKeybindBtn'),
+        pttKeyLabel: document.getElementById('pttKeyLabel'),
 
         // Модалка создания комнаты
         createRoomModal: document.getElementById('createRoomModal'),
@@ -170,6 +180,16 @@
 
         if (dom.settingsUserName) dom.settingsUserName.value = state.user.name;
         if (dom.voiceFilterSelect) dom.voiceFilterSelect.value = state.voiceFilter;
+        // Инициализация UI настроек PTT
+        if (dom.activationModeSelect) {
+            dom.activationModeSelect.value = state.activationMode;
+        }
+        if (dom.pttKeybindSection) {
+            dom.pttKeybindSection.style.display = state.activationMode === 'ptt' ? 'block' : 'none';
+        }
+        if (dom.pttKeyLabel) {
+            dom.pttKeyLabel.textContent = state.pttKeyLabel;
+        }
     }
 
     function checkInviteUrl() {
@@ -249,6 +269,51 @@
                 window.audioManager.setMasterVolume(state.masterVolume);
             });
         }
+        if (dom.activationModeSelect) {
+            dom.activationModeSelect.addEventListener('change', (e) => {
+                state.activationMode = e.target.value;
+                localStorage.setItem('voicechat_activation_mode', state.activationMode);
+                if (dom.pttKeybindSection) {
+                    dom.pttKeybindSection.style.display = state.activationMode === 'ptt' ? 'block' : 'none';
+                }
+                applyActivationMode();
+            });
+        }
+
+        // 2. Нажатие кнопки смены бинда
+        if (dom.pttKeybindBtn) {
+            dom.pttKeybindBtn.addEventListener('click', () => {
+                state.isRecordingKeybind = true;
+                dom.pttKeybindBtn.textContent = 'Нажмите любую клавишу...';
+                dom.pttKeybindBtn.classList.add('recording');
+            });
+        }
+
+        // 3. Захват глобальных клавиш клавиатуры в браузере
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+
+        // 4. Поддержка зажатия кнопки микрофона на смартфонах (Touch / Pointer Hold)
+        if (dom.micBtn) {
+            const startHold = (e) => {
+                if (state.activationMode === 'ptt' && state.isJoined) {
+                    e.preventDefault();
+                    setPttState(true);
+                }
+            };
+
+            const endHold = (e) => {
+                if (state.activationMode === 'ptt' && state.isJoined) {
+                    e.preventDefault();
+                    setPttState(false);
+                }
+            };
+
+            dom.micBtn.addEventListener('pointerdown', startHold);
+            dom.micBtn.addEventListener('pointerup', endHold);
+            dom.micBtn.addEventListener('pointercancel', endHold);
+            dom.micBtn.addEventListener('pointerleave', endHold);
+        }
     }
 
     // =========================================================================
@@ -324,6 +389,72 @@
         });
     }
 
+    function handleKeyDown(e) {
+        // Режим записи бинда
+        if (state.isRecordingKeybind) {
+            e.preventDefault();
+            state.pttKey = e.code;
+            state.pttKeyLabel = e.key.toUpperCase();
+            if (e.code === 'Space') state.pttKeyLabel = 'SPACE';
+
+            localStorage.setItem('voicechat_ptt_key', state.pttKey);
+            localStorage.setItem('voicechat_ptt_key_label', state.pttKeyLabel);
+
+            state.isRecordingKeybind = false;
+            if (dom.pttKeybindBtn) {
+                dom.pttKeybindBtn.innerHTML = `Клавиша: <strong id="pttKeyLabel">${state.pttKeyLabel}</strong> (нажмите для смены)`;
+                dom.pttKeybindBtn.classList.remove('recording');
+            }
+            return;
+        }
+
+        // Игнорируем ввод, если пользователь пишет сообщение в чат
+        if (document.activeElement === dom.chatInput || document.activeElement?.tagName === 'INPUT') {
+            return;
+        }
+
+        // Активация PTT по нажатию
+        if (state.activationMode === 'ptt' && e.code === state.pttKey && !e.repeat && state.isJoined) {
+            setPttState(true);
+        }
+    }
+
+    function handleKeyUp(e) {
+        if (state.activationMode === 'ptt' && e.code === state.pttKey && state.isJoined) {
+            setPttState(false);
+        }
+    }
+
+    function setPttState(isPressed) {
+        if (state.isPttPressed === isPressed) return;
+        state.isPttPressed = isPressed;
+
+        window.audioManager.setPttActive(isPressed);
+
+        if (dom.micBtn) {
+            dom.micBtn.classList.toggle('ptt-active', isPressed);
+            dom.micBtn.textContent = isPressed ? '🎙️' : '📻';
+        }
+    }
+
+    function applyActivationMode() {
+        if (state.activationMode === 'ptt') {
+            // В режиме PTT микрофон по умолчанию заглушен до нажатия клавиши
+            window.audioManager.setPttActive(false);
+            if (dom.micBtn) {
+                dom.micBtn.textContent = '📻';
+                dom.micBtn.title = `Зажмите [${state.pttKeyLabel}] для разговора`;
+            }
+        } else {
+            // В режиме Open Mic микрофон всегда открыт (если не включен общий Mute)
+            window.audioManager.setPttActive(!state.isMuted);
+            if (dom.micBtn) {
+                dom.micBtn.textContent = state.isMuted ? '🔇' : '🎤';
+                dom.micBtn.title = 'Включить/Выключить микрофон';
+            }
+        }
+    }
+
     function handleConnectionClose() {
         if (!state.isJoined) return;
 
@@ -363,6 +494,11 @@
                     break;
                 case 'user_left':
                     onUserLeft(msg.payload);
+                    break;
+                case 'ptt_trigger':
+                    if (state.activationMode === 'ptt') {
+                        setPttState(Boolean(msg.payload.isPressed));
+                    }
                     break;
                 case 'user_muted':
                     onUserMuted(msg.payload);
@@ -443,6 +579,7 @@
         }
 
         state.isJoined = true;
+        applyActivationMode();
         dom.connectionPanel.style.display = 'none';
         dom.callWorkspace.style.display = 'flex';
         dom.footerControls.style.display = 'flex';
