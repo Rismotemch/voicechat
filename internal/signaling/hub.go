@@ -108,6 +108,37 @@ func NewHub(cfg *config.Config, log zerolog.Logger) *Hub {
 	return hub
 }
 
+// HandleMinecraftTelemetry принимает телеметрию от Forge-мода и рассылает в MC-комнаты
+func (h *Hub) HandleMinecraftTelemetry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload models.MinecraftPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, `{"error":"Invalid payload"}`, http.StatusBadRequest)
+		return
+	}
+
+	var mcRoomIDs []string
+	h.mu.RLock()
+	for _, room := range h.rooms {
+		if room.MinecraftMode {
+			mcRoomIDs = append(mcRoomIDs, room.ID)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, roomID := range mcRoomIDs {
+		h.broadcastToRoom(roomID, "minecraft_telemetry", map[string]interface{}{
+			"players": payload.Players,
+		}, "")
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -294,9 +325,10 @@ type JoinMessage struct {
 }
 
 type CreateRoomMessage struct {
-	RoomName string `json:"roomName"`
-	Password string `json:"password,omitempty"`
-	MaxUsers int    `json:"maxUsers,omitempty"`
+	RoomName      string `json:"roomName"`
+	Password      string `json:"password,omitempty"`
+	MaxUsers      int    `json:"maxUsers,omitempty"`
+	MinecraftMode bool   `json:"minecraftMode,omitempty"`
 }
 
 type MuteMessage struct {
@@ -485,10 +517,11 @@ func (c *Client) handleJoin(msg JoinMessage) {
 	c.mu.Unlock()
 
 	c.sendJSON("room_state", map[string]interface{}{
-		"users":    room.GetUsers(),
-		"messages": room.GetMessages(),
-		"hostId":   room.HostID,
-		"isLocked": room.IsLocked,
+		"users":         room.GetUsers(),
+		"messages":      room.GetMessages(),
+		"hostId":        room.HostID,
+		"isLocked":      room.IsLocked,
+		"minecraftMode": room.MinecraftMode,
 	})
 
 	c.Hub.broadcastToRoom(room.ID, "user_joined", map[string]interface{}{
@@ -659,6 +692,7 @@ func (c *Client) handleCreateRoom(msg CreateRoomMessage) {
 
 	room := models.NewRoom(msg.RoomName, maxUsers)
 	room.Password = msg.Password
+	room.MinecraftMode = msg.MinecraftMode
 
 	c.Hub.rooms[room.ID] = room
 	c.Hub.audioHubs[room.ID] = NewAudioHub()

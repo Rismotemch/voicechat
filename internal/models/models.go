@@ -117,6 +117,7 @@ type Room struct {
 	SpatialAudioMode bool             `json:"spatialAudioMode,omitempty"`
 	HighQualityMode  bool             `json:"highQualityMode,omitempty"`
 	CreatedAt        time.Time        `json:"createdAt"`
+	MinecraftMode    bool             `json:"minecraftMode,omitempty"`
 }
 
 func NewRoom(name string, maxUsers int) *Room {
@@ -134,6 +135,22 @@ func NewRoom(name string, maxUsers int) *Room {
 		MaxUsers:  maxUsers,
 		CreatedAt: time.Now().UTC(),
 	}
+}
+
+type PlayerTelemetry struct {
+	Username  string  `json:"username"`
+	UUID      string  `json:"uuid"`
+	Dimension int     `json:"dimension"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Z         float64 `json:"z"`
+	Yaw       float64 `json:"yaw"`
+	Pitch     float64 `json:"pitch"`
+	InCave    bool    `json:"inCave"`
+}
+
+type MinecraftPayload struct {
+	Players []PlayerTelemetry `json:"players"`
 }
 
 // AddUser добавляет пользователя в комнату

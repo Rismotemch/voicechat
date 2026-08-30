@@ -45,6 +45,9 @@ func main() {
 	// WebSocket аудио и сигнальный эндпоинт
 	mux.HandleFunc("/ws", hub.HandleWebSocket)
 
+	// Эндпоинт телеметрии от мода Minecraft Forge 1.7.10
+	mux.HandleFunc("/api/minecraft/telemetry", hub.HandleMinecraftTelemetry)
+
 	// API загрузки файлов и изображений в микро-чат
 	mux.HandleFunc("/api/upload", hub.HandleUpload)
 
