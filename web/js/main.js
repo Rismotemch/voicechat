@@ -642,12 +642,12 @@
     }
 
     function onMinecraftTelemetry(payload) {
+        console.log('[MC Telemetry]', payload);
         if (!payload || !Array.isArray(payload.players)) return;
 
         const myName = (state.user?.name || '').trim().toLowerCase();
         let myTelemetry = null;
 
-        // 1. Поиск локального игрока
         for (const p of payload.players) {
             if (p.username && p.username.trim().toLowerCase() === myName) {
                 myTelemetry = p;
@@ -666,9 +666,8 @@
             );
         }
 
-        // 2. Обновление координат остальных участников
         let matchedCount = 0;
-        let lastDistStr = '';
+        let distInfo = '';
 
         for (const p of payload.players) {
             const pName = (p.username || '').trim().toLowerCase();
@@ -693,7 +692,7 @@
                         const dy = p.y - myTelemetry.y;
                         const dz = p.z - myTelemetry.z;
                         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz).toFixed(1);
-                        lastDistStr = `[${p.username}: ${dist}м]`;
+                        distInfo += ` [${p.username}: ${dist}м]`;
                     }
                     matchedCount++;
                     break;
@@ -701,14 +700,16 @@
             }
         }
 
-        // 3. Вывод статуса на плашку в шапке
-        if (dom.mcStatusBadge) {
+        const badge = document.getElementById('mcStatusBadge');
+        if (badge) {
             if (!myTelemetry) {
-                dom.mcStatusBadge.innerText = `⚠️ MC: Ник "${state.user?.name}" не найден на сервере!`;
-                dom.mcStatusBadge.style.color = '#ef4444';
+                badge.innerText = `⚠️ Ник "${state.user?.name}" не найден в игре!`;
+                badge.style.background = 'rgba(239, 68, 68, 0.2)';
+                badge.style.color = '#ef4444';
             } else {
-                dom.mcStatusBadge.innerText = `⛏️ 3D активен: Вы (${myTelemetry.x.toFixed(0)}, ${myTelemetry.z.toFixed(0)}) | ${matchedCount} рядом ${lastDistStr}`;
-                dom.mcStatusBadge.style.color = '#10b981';
+                badge.innerText = `⛏️ 3D: (${myTelemetry.x.toFixed(0)}, ${myTelemetry.z.toFixed(0)}) | Рядом: ${matchedCount}${distInfo}`;
+                badge.style.background = 'rgba(16, 185, 129, 0.2)';
+                badge.style.color = '#10b981';
             }
         }
     }

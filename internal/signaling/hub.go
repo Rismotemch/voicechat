@@ -117,6 +117,7 @@ func (h *Hub) HandleMinecraftTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	var payload models.MinecraftPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		h.log.Warn().Err(err).Msg("Invalid MC telemetry payload")
 		http.Error(w, `{"error":"Invalid payload"}`, http.StatusBadRequest)
 		return
 	}
@@ -129,6 +130,11 @@ func (h *Hub) HandleMinecraftTelemetry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.mu.RUnlock()
+
+	h.log.Info().
+		Int("players", len(payload.Players)).
+		Int("mcRooms", len(mcRoomIDs)).
+		Msg("Received Minecraft telemetry")
 
 	for _, roomID := range mcRoomIDs {
 		h.broadcastToRoom(roomID, "minecraft_telemetry", map[string]interface{}{
