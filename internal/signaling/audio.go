@@ -14,14 +14,14 @@ const (
 	BytesPerFrame   = 640   // 320 сэмплов * 2 байта (Int16)
 	MaxSenderIDLen  = 128   // Максимальная длина ID для заголовка пакета
 
-	// Параметры фильтрации и гейта
-	HighPassCutoffFreq = 140.0 // Срезаем низкочастотный гул кулера (до 140 Гц)
-	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
-	NoiseGateThreshold = 0.008 // Порог открытия гейта
-	SpeechThreshold    = 0.015 // Порог для работы AGC (только голос)
-	VADHangoverFrames  = 20    // 400 мс удержание хвоста слов (20 фреймов)
-	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
-	MaxGainMultiplier  = 2.0   // Ограничение усиления слабого сигнала
+	// Параметры фильтрации и гейта (откалиброваны для естественной речи)
+	HighPassCutoffFreq = 85.0   // 85 Гц сохраняет плотность голоса и разборчивость
+	HighPassQ          = 0.707  // Добротность фильтра Баттерворта
+	NoiseGateThreshold = 0.0035 // Мягкий порог (не срезает тихие согласные и шёпот)
+	SpeechThreshold    = 0.008  // Порог для работы AGC
+	VADHangoverFrames  = 28     // 560 мс удержание хвоста (окончания слов не глотаются)
+	TargetRMS          = 0.13   // Целевой уровень RMS для AGC
+	MaxGainMultiplier  = 2.2    // Максимальное адаптивное усиление
 )
 
 // =============================================================================
@@ -139,7 +139,7 @@ type AudioProcessor struct {
 	hangoverCount int
 	isSpeaking    bool
 	currentGain   float32
-	gateEnvelope  float32 // Плавная огибающая гейта (0.0 ... 1.0)
+	gateEnvelope  float32
 	activeFilter  string
 
 	radioHPFilter *BiquadFilter
@@ -172,7 +172,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 1. High-Pass фильтрация гула
+	// 1. Мягкая High-Pass фильтрация инфранизкого гула
 	p.hpFilter.Process(samples, samples)
 
 	// 2. Расчет энергии RMS
@@ -182,7 +182,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. VAD и целевой уровень гейта
+	// 3. VAD с продленным удержанием
 	var targetGate float32
 	if rms >= NoiseGateThreshold {
 		p.hangoverCount = VADHangoverFrames
@@ -197,8 +197,8 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		targetGate = 0.0
 	}
 
-	// Если гейт закрыт и огибающая затухла — отбрасываем тишину
-	if !p.isSpeaking && p.gateEnvelope < 0.01 {
+	// Сброс тишины при полном закрытии
+	if !p.isSpeaking && p.gateEnvelope < 0.005 {
 		p.gateEnvelope = 0.0
 		for i := 0; i < n; i++ {
 			samples[i] = 0
@@ -206,7 +206,7 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		return false
 	}
 
-	// 4. AGC: реагирует только на голос (rms >= SpeechThreshold), не разгоняя тихий шум
+	// 4. AGC: адаптивное выравнивание громкости
 	if rms >= SpeechThreshold {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
@@ -214,25 +214,25 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 		} else if desiredGain < 0.6 {
 			desiredGain = 0.6
 		}
-		p.currentGain = p.currentGain*0.95 + desiredGain*0.05
+		p.currentGain = p.currentGain*0.96 + desiredGain*0.04
 	}
 
-	// 5. Применение голосовых эффектов
+	// 5. Применение голосовых фильтров
 	p.applyVoiceEffects(samples)
 
-	// 6. Плавное применение гейта по сэмплам (Attack: быстрый, Release: мягкий)
+	// 6. Быстрая атака (0 задержки на первые буквы) и плавный релиз
 	var envStep float32
 	if targetGate > p.gateEnvelope {
-		envStep = 0.15 // Быстрая атака (без проглатывания начала слов)
+		envStep = 0.35 // Мгновенное открытие на первый согласный
 	} else {
-		envStep = 0.02 // Мягкий спад (без щелчков обрыва)
+		envStep = 0.015 // Очень плавное угасание хвоста
 	}
 
 	for i := 0; i < n; i++ {
 		p.gateEnvelope += (targetGate - p.gateEnvelope) * envStep
 		val := samples[i] * p.currentGain * p.gateEnvelope
 
-		// Мягкий лимитер
+		// Soft Limiter
 		if val > 1.0 {
 			val = 1.0
 		} else if val < -1.0 {
