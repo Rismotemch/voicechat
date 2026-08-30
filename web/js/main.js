@@ -1,7 +1,7 @@
 /**
  * VoiceChat Client Engine - web/js/main.js
  * Integrated with Text Micro-Chat, File Sharing, Voice DSP Filters,
- * Dynamic QR Code Generator, Host Controls & 60 FPS Visualizer.
+ * Dynamic QR Code Generator, Host Controls, 60 FPS Visualizer & Minecraft 3D Audio Bridge.
  */
 
 (() => {
@@ -27,10 +27,12 @@
         hostId: null,
         isHost: false,
         isLocked: false,
+        minecraftMode: false,
+        spatialEngine: null,
 
         // Настройки аудио и DSP
         voiceFilter: 'none',
-        echoCancellationEnabled: true,
+        echoCancellationEnabled: false,
         masterVolume: 1.0,
         micSensitivity: 100,
 
@@ -60,7 +62,6 @@
     // Кэш DOM-элементов
     // =========================================================================
     const dom = {
-        // Навигация и контейнеры
         header: document.querySelector('.header'),
         mainContent: document.querySelector('.main-content'),
         currentRoomLabel: document.getElementById('currentRoomLabel'),
@@ -113,6 +114,7 @@
         roomNameInput: document.getElementById('roomNameInput'),
         roomPasswordInput: document.getElementById('roomPasswordInput'),
         roomMaxUsersInput: document.getElementById('roomMaxUsersInput'),
+        roomMinecraftModeInput: document.getElementById('roomMinecraftModeInput'),
         confirmCreateRoomBtn: document.getElementById('confirmCreateRoomBtn'),
         cancelCreateRoomBtn: document.getElementById('cancelCreateRoomBtn'),
 
@@ -145,7 +147,7 @@
     function initUserProfile() {
         let name = localStorage.getItem('voicechat_username');
         if (!name || !name.trim()) {
-            name = 'Гость ' + Math.floor(100 + Math.random() * 900);
+            name = 'Player_' + Math.floor(100 + Math.random() * 900);
             localStorage.setItem('voicechat_username', name);
         }
 
@@ -198,7 +200,6 @@
     }
 
     function bindUIEvents() {
-        // Навигация и звонок
         if (dom.joinBtn) dom.joinBtn.addEventListener('click', () => joinRoom());
         if (dom.micBtn) dom.micBtn.addEventListener('click', () => toggleMute());
         if (dom.leaveBtn) dom.leaveBtn.addEventListener('click', () => leaveRoom());
@@ -208,27 +209,23 @@
         if (dom.settingsBtn) dom.settingsBtn.addEventListener('click', () => openSettingsModal());
         if (dom.closeSettingsBtn) dom.closeSettingsBtn.addEventListener('click', () => saveSettings());
 
-        // Хост-действия и инвайты
         if (dom.shareInviteBtn) dom.shareInviteBtn.addEventListener('click', () => openInviteModal());
         if (dom.lockRoomBtn) dom.lockRoomBtn.addEventListener('click', () => toggleLockRoom());
         if (dom.muteAllBtn) dom.muteAllBtn.addEventListener('click', () => triggerMuteAll());
         if (dom.closeInviteModalBtn) dom.closeInviteModalBtn.addEventListener('click', () => closeInviteModal());
         if (dom.copyInviteUrlBtn) dom.copyInviteUrlBtn.addEventListener('click', () => copyInviteLink());
 
-        // Чат
         if (dom.chatToggleBtn) dom.chatToggleBtn.addEventListener('click', () => toggleChatPanel());
         if (dom.closeChatBtn) dom.closeChatBtn.addEventListener('click', () => toggleChatPanel(false));
         if (dom.chatForm) dom.chatForm.addEventListener('submit', (e) => { e.preventDefault(); handleSendTextMessage(); });
         if (dom.chatAttachBtn) dom.chatAttachBtn.addEventListener('click', () => dom.chatFileInput && dom.chatFileInput.click());
         if (dom.chatFileInput) dom.chatFileInput.addEventListener('change', handleFileSelect);
 
-        // Модалки комнат
         if (dom.confirmCreateRoomBtn) dom.confirmCreateRoomBtn.addEventListener('click', () => handleCreateRoomSubmit());
         if (dom.cancelCreateRoomBtn) dom.cancelCreateRoomBtn.addEventListener('click', () => closeCreateRoomModal());
         if (dom.confirmPasswordBtn) dom.confirmPasswordBtn.addEventListener('click', () => handlePasswordSubmit());
         if (dom.cancelPasswordBtn) dom.cancelPasswordBtn.addEventListener('click', () => closePasswordModal());
 
-        // Ползунки
         if (dom.micSensitivity) {
             dom.micSensitivity.addEventListener('input', (e) => {
                 const val = parseInt(e.target.value, 10) || 0;
@@ -326,8 +323,6 @@
         if (state.reconnectAttempts < state.maxReconnectAttempts) {
             state.reconnectAttempts++;
             const timeout = Math.min(1000 * Math.pow(1.5, state.reconnectAttempts), 5000);
-            console.warn(`[VoiceChat] Reconnecting in ${Math.round(timeout)}ms...`);
-
             state.reconnectTimer = setTimeout(async () => {
                 try {
                     await connectWebSocket();
@@ -401,6 +396,9 @@
                 case 'force_mute':
                     onForceMute();
                     break;
+                case 'minecraft_telemetry':
+                    onMinecraftTelemetry(msg.payload);
+                    break;
             }
         } catch (err) {
             console.error('[VoiceChat] Parse error:', err);
@@ -414,8 +412,15 @@
         state.hostId = payload.hostId || null;
         state.isHost = Boolean(state.user && state.hostId === state.user.id);
         state.isLocked = Boolean(payload.isLocked);
+        state.minecraftMode = Boolean(payload.minecraftMode);
 
-        // Восстановление списка участников
+        if (state.minecraftMode && window.SpatialAudioEngine) {
+            state.spatialEngine = new window.SpatialAudioEngine(window.audioManager);
+            state.spatialEngine.init();
+        } else {
+            state.spatialEngine = null;
+        }
+
         if (Array.isArray(payload.users)) {
             payload.users.forEach(u => {
                 const isSelf = Boolean(state.user && u.id === state.user.id);
@@ -423,7 +428,6 @@
             });
         }
 
-        // Восстановление истории чата
         if (Array.isArray(payload.messages)) {
             payload.messages.forEach(m => {
                 const isSelf = Boolean(state.user && m.userId === state.user.id);
@@ -439,7 +443,6 @@
         if (dom.chatToggleBtn) dom.chatToggleBtn.style.display = 'flex';
         if (dom.hostControlsBar) dom.hostControlsBar.style.display = 'flex';
 
-        // Отправка текущего активного голосового фильтра
         if (state.voiceFilter !== 'none') {
             sendSignaling('set_voice_filter', { filter: state.voiceFilter });
         }
@@ -466,6 +469,9 @@
         if (payload.userId) {
             removeParticipantFromUI(payload.userId);
             window.audioManager.removeParticipant(payload.userId);
+            if (state.spatialEngine) {
+                state.spatialEngine.removeChain(payload.userId);
+            }
         }
     }
 
@@ -541,7 +547,12 @@
 
             const name = document.createElement('div');
             name.className = 'room-card-name';
-            name.textContent = room.name;
+
+            if (room.minecraftMode) {
+                name.innerHTML = `<span title="Режим Minecraft GTNH">⛏️</span> ${escapeHTML(room.name)}`;
+            } else {
+                name.textContent = room.name;
+            }
 
             const users = document.createElement('div');
             users.className = 'room-card-users';
@@ -623,6 +634,49 @@
         }
     }
 
+    function onMinecraftTelemetry(payload) {
+        if (!state.spatialEngine || !payload || !Array.isArray(payload.players)) return;
+
+        const myName = state.user?.name.toLowerCase();
+        let myTelemetry = null;
+
+        for (const p of payload.players) {
+            if (p.username && p.username.toLowerCase() === myName) {
+                myTelemetry = p;
+                break;
+            }
+        }
+
+        if (myTelemetry) {
+            state.spatialEngine.updateListener(
+                myTelemetry.x,
+                myTelemetry.y,
+                myTelemetry.z,
+                myTelemetry.yaw,
+                myTelemetry.pitch,
+                myTelemetry.inCave
+            );
+        }
+
+        for (const p of payload.players) {
+            if (p.username && p.username.toLowerCase() === myName) continue;
+
+            for (const [userId, participant] of state.participants.entries()) {
+                if (participant.user && participant.user.name.toLowerCase() === p.username.toLowerCase()) {
+                    state.spatialEngine.updateRemotePlayer(
+                        userId,
+                        p.x,
+                        p.y,
+                        p.z,
+                        p.dimension,
+                        p.inCave
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     // =========================================================================
     // Текстовый микро-чат и загрузка файлов
     // =========================================================================
@@ -652,7 +706,6 @@
     async function uploadAndSendFile(file) {
         if (!file) return;
 
-        // Лимит на стороне клиента: 50MB
         if (file.size > 50 * 1024 * 1024) {
             alert('Файл слишком большой. Максимальный размер: 50 МБ');
             return;
@@ -667,9 +720,7 @@
                 body: formData
             });
 
-            if (!resp.ok) {
-                throw new Error('Ошибка сервера при загрузке файла');
-            }
+            if (!resp.ok) throw new Error('Ошибка при загрузке');
 
             const data = await resp.json();
             sendSignaling('send_file', {
@@ -753,14 +804,12 @@
         const bubble = document.createElement('div');
         bubble.className = 'chat-bubble';
 
-        // Текстовое сообщение
         if (msg.content) {
             const textSpan = document.createElement('span');
             textSpan.textContent = msg.content;
             bubble.appendChild(textSpan);
         }
 
-        // Превью изображения
         if (msg.fileType === 'image' && msg.fileURL) {
             const img = document.createElement('img');
             img.src = msg.fileURL;
@@ -768,9 +817,7 @@
             img.className = 'chat-img-preview';
             img.addEventListener('click', () => window.open(msg.fileURL, '_blank'));
             bubble.appendChild(img);
-        }
-        // Ссылка на скачивание файла
-        else if (msg.fileURL) {
+        } else if (msg.fileURL) {
             const fileLink = document.createElement('a');
             fileLink.href = msg.fileURL;
             fileLink.download = msg.fileName || 'file';
@@ -816,7 +863,6 @@
         const inviteLink = url.toString();
         if (dom.inviteUrlInput) dom.inviteUrlInput.value = inviteLink;
 
-        // Рендерим QR-код на Canvas
         if (dom.inviteQrCanvas) {
             renderQRCodeToCanvas(dom.inviteQrCanvas, inviteLink);
         }
@@ -843,16 +889,12 @@
         });
     }
 
-    /**
-     * Автономный генератор QR-кода на Canvas без внешних библиотек
-     */
     function renderQRCodeToCanvas(canvas, text) {
         const ctx = canvas.getContext('2d');
         const size = canvas.width;
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, size, size);
 
-        // Используем встроенный генератор таблицы модулей QR
         const qrMatrix = generateQRMatrix(text);
         const moduleCount = qrMatrix.length;
         const cellSize = (size - 24) / moduleCount;
@@ -868,9 +910,6 @@
         }
     }
 
-    /**
-     * Минималистичный генератор матрицы QR-кода (Byte Mode, Mask 0)
-     */
     function generateQRMatrix(data) {
         const bytes = new TextEncoder().encode(data);
         const version = bytes.length > 50 ? 5 : (bytes.length > 25 ? 3 : 2);
@@ -897,7 +936,6 @@
         setFinder(0, size - 7);
         setFinder(size - 7, 0);
 
-        // Timing patterns
         for (let i = 8; i < size - 8; i++) {
             isReserved[6][i] = true;
             matrix[6][i] = (i % 2 === 0);
@@ -905,7 +943,6 @@
             matrix[i][6] = (i % 2 === 0);
         }
 
-        // Заполнение данных с маской
         let bitIndex = 0;
         const bits = [];
         for (let i = 0; i < bytes.length; i++) {
@@ -1024,6 +1061,7 @@
 
         window.audioManager.stopMicrophone();
         state.isJoined = false;
+        state.spatialEngine = null;
         clearParticipantsUI();
         clearChatUI();
 
@@ -1060,6 +1098,7 @@
         window.audioManager.stopMicrophone();
 
         state.isJoined = false;
+        state.spatialEngine = null;
         clearParticipantsUI();
         clearChatUI();
 
@@ -1171,10 +1210,12 @@
 
         const password = dom.roomPasswordInput ? dom.roomPasswordInput.value : '';
         const maxUsers = dom.roomMaxUsersInput ? parseInt(dom.roomMaxUsersInput.value, 10) || 10 : 10;
+        const minecraftMode = dom.roomMinecraftModeInput ? dom.roomMinecraftModeInput.checked : false;
 
         const payload = {
             roomName,
-            maxUsers: Math.min(10, Math.max(2, maxUsers))
+            maxUsers: Math.min(10, Math.max(2, maxUsers)),
+            minecraftMode
         };
         if (password) payload.password = password;
 
@@ -1184,6 +1225,7 @@
             closeCreateRoomModal();
             if (dom.roomNameInput) dom.roomNameInput.value = '';
             if (dom.roomPasswordInput) dom.roomPasswordInput.value = '';
+            if (dom.roomMinecraftModeInput) dom.roomMinecraftModeInput.checked = false;
         } catch (err) {
             console.error('[VoiceChat] Create room failed:', err);
         }
