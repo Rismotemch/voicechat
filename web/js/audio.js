@@ -173,15 +173,7 @@ class AudioManager {
 
             const analyser = this.audioCtx.createAnalyser();
             analyser.fftSize = 64;
-            analyser.smoothingTimeConstant = 0.4;
             gainNode.connect(analyser);
-
-            // Проверяем: если комната создана с режимом Minecraft и активен SpatialEngine
-            if (window.appState && window.appState.minecraftMode && window.appState.spatialEngine) {
-                window.appState.spatialEngine.createSpatialChain(userId, gainNode, this.masterGain);
-            } else {
-                gainNode.connect(this.masterGain);
-            }
 
             p = {
                 gainNode,
@@ -190,8 +182,14 @@ class AudioManager {
                 speakingTimeout: null,
                 isSpeaking: false
             };
-
             this.participants.set(userId, p);
+
+            // Если комната в режиме Minecraft — сразу строим 3D-цепь
+            if (window.appState && window.appState.minecraftMode && window.appState.spatialEngine) {
+                window.appState.spatialEngine.createSpatialChain(userId, gainNode, this.masterGain);
+            } else {
+                gainNode.connect(this.masterGain);
+            }
         }
         return p;
     }

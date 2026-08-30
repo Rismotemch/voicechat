@@ -642,19 +642,20 @@
     }
 
     function onMinecraftTelemetry(payload) {
-        if (!state.spatialEngine || !payload || !Array.isArray(payload.players)) return;
+        if (!payload || !Array.isArray(payload.players)) return;
 
-        const myName = state.user?.name.toLowerCase();
+        const myName = (state.user?.name || '').trim().toLowerCase();
         let myTelemetry = null;
 
+        // 1. Поиск локального игрока
         for (const p of payload.players) {
-            if (p.username && p.username.toLowerCase() === myName) {
+            if (p.username && p.username.trim().toLowerCase() === myName) {
                 myTelemetry = p;
                 break;
             }
         }
 
-        if (myTelemetry) {
+        if (myTelemetry && state.spatialEngine) {
             state.spatialEngine.updateListener(
                 myTelemetry.x,
                 myTelemetry.y,
@@ -665,21 +666,49 @@
             );
         }
 
+        // 2. Обновление координат остальных участников
+        let matchedCount = 0;
+        let lastDistStr = '';
+
         for (const p of payload.players) {
-            if (p.username && p.username.toLowerCase() === myName) continue;
+            const pName = (p.username || '').trim().toLowerCase();
+            if (pName === myName) continue;
 
             for (const [userId, participant] of state.participants.entries()) {
-                if (participant.user && participant.user.name.toLowerCase() === p.username.toLowerCase()) {
-                    state.spatialEngine.updateRemotePlayer(
-                        userId,
-                        p.x,
-                        p.y,
-                        p.z,
-                        p.dimension,
-                        p.inCave
-                    );
+                const uName = (participant.user?.name || '').trim().toLowerCase();
+                if (uName === pName) {
+                    if (state.spatialEngine) {
+                        state.spatialEngine.updateRemotePlayer(
+                            userId,
+                            p.x,
+                            p.y,
+                            p.z,
+                            p.dimension,
+                            p.inCave
+                        );
+                    }
+
+                    if (myTelemetry) {
+                        const dx = p.x - myTelemetry.x;
+                        const dy = p.y - myTelemetry.y;
+                        const dz = p.z - myTelemetry.z;
+                        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz).toFixed(1);
+                        lastDistStr = `[${p.username}: ${dist}м]`;
+                    }
+                    matchedCount++;
                     break;
                 }
+            }
+        }
+
+        // 3. Вывод статуса на плашку в шапке
+        if (dom.mcStatusBadge) {
+            if (!myTelemetry) {
+                dom.mcStatusBadge.innerText = `⚠️ MC: Ник "${state.user?.name}" не найден на сервере!`;
+                dom.mcStatusBadge.style.color = '#ef4444';
+            } else {
+                dom.mcStatusBadge.innerText = `⛏️ 3D активен: Вы (${myTelemetry.x.toFixed(0)}, ${myTelemetry.z.toFixed(0)}) | ${matchedCount} рядом ${lastDistStr}`;
+                dom.mcStatusBadge.style.color = '#10b981';
             }
         }
     }
