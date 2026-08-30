@@ -1,7 +1,13 @@
 /**
  * VoiceChat Client Engine - web/js/main.js
- * Integrated with Text Micro-Chat, File Sharing, Voice DSP Filters,
- * Dynamic QR Code Generator, Host Controls, 60 FPS Visualizer & Minecraft 3D Audio Bridge.
+ * 
+ * Features:
+ * - WebSocket Signaling & Real-Time Audio Transport
+ * - Minecraft GTNH Telemetry Integration & 3D Spatial Audio (HRTF + Reverb)
+ * - Text Micro-Chat with Drag-and-Drop & Clipboard File Sharing
+ * - Host Controls (Room Lock, Kick, Mute All) & Server-Side DSP Filter Selection
+ * - Dynamic QR Code Generator on Canvas & Room Invite Deep Links
+ * - 60 FPS Frequency Wave Visualizer & VAD Speaking Animation
  */
 
 (() => {
@@ -136,6 +142,7 @@
     // Инициализация приложения
     // =========================================================================
     document.addEventListener('DOMContentLoaded', () => {
+        window.appState = state; // Экспорт для audio.js и spatial.js
         initUserProfile();
         bindUIEvents();
         setupAudioCallbacks();

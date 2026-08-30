@@ -1,38 +1,42 @@
 /**
- * VoiceChat Audio Engine - web/js/audio.js
- * High-performance AudioWorklet capture pipeline with adaptive jitter buffer,
- * sample-accurate Web Audio scheduling, and Safari/iOS auto-unlock.
+ * VoiceChat Core Audio Engine - web/js/audio.js
+ * 
+ * Responsibilities:
+ * - Web Audio API pipeline & AudioContext lifecycle management
+ * - Microphone capture via AudioWorklet (16kHz PCM downsampling)
+ * - Binary PCM packet decoding & sample-accurate timeline playback
+ * - Dynamic routing to 3D Spatial Audio Engine (Minecraft Mode) or Standard Stereo
+ * - FFT Analysers for participant visualizers and VAD speaking detection
  */
 
 class AudioManager {
-    constructor(options = {}) {
-        this.targetSampleRate = 16000;
-        this.frameDurationMs = 20;
-        this.samplesPerFrame = (this.targetSampleRate * this.frameDurationMs) / 1000; // 320 сэмплов
-        this.jitterBufferMs = options.jitterBufferMs || 50; // 50 мс стартовый буфер
-        this.maxDriftSec = options.maxDriftSec || 0.14;     // Максимальный допуск дрейфа 140 мс
-
+    constructor() {
         this.audioCtx = null;
+        this.masterGain = null;
+        this.compressor = null;
         this.micStream = null;
         this.micSourceNode = null;
         this.workletNode = null;
+        this.selfAnalyser = null;
 
-        this.masterGainNode = null;
-        this.analyserNode = null;
+        // userId -> { gainNode, analyser, nextPlayTime, speakingTimeout, isSpeaking }
+        this.participants = new Map();
 
-        this.participants = new Map(); // senderId -> { gainNode, nextPlayTime, analyser, freqData }
-        this.speakingTimeouts = new Map();
-
+        this.sampleRate = 16000;
         this.isMuted = false;
+        this.masterVolume = 1.0;
         this.isInitialized = false;
-        this.isWorkletLoaded = false;
-        this.textDecoder = new TextDecoder('utf-8');
 
-        // Callbacks
-        this.onAudioFrame = null;
-        this.onSpeakingStateChange = null;
+        // Коллбэки для интеграции с внешними скриптами
+        this.onAudioFrame = null;          // fn(arrayBuffer)
+        this.onSpeakingStateChange = null; // fn(userId, isSpeaking)
+
+        this.textDecoder = new TextDecoder('utf-8');
     }
 
+    /**
+     * Инициализация AudioContext и загрузка AudioWorklet
+     */
     async init() {
         if (this.isInitialized && this.audioCtx) {
             if (this.audioCtx.state === 'suspended') {
@@ -44,257 +48,320 @@ class AudioManager {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
 
-        this.masterGainNode = this.audioCtx.createGain();
-        this.masterGainNode.gain.value = 1.0;
-        this.masterGainNode.connect(this.audioCtx.destination);
+        // Динамический компрессор для предотвращения перегрузок и клиппинга
+        this.compressor = this.audioCtx.createDynamicsCompressor();
+        this.compressor.threshold.setValueAtTime(-12, this.audioCtx.currentTime);
+        this.compressor.knee.setValueAtTime(30, this.audioCtx.currentTime);
+        this.compressor.ratio.setValueAtTime(8, this.audioCtx.currentTime);
+        this.compressor.attack.setValueAtTime(0.003, this.audioCtx.currentTime);
+        this.compressor.release.setValueAtTime(0.15, this.audioCtx.currentTime);
 
-        this.analyserNode = this.audioCtx.createAnalyser();
-        this.analyserNode.fftSize = 64;
-        this.analyserNode.smoothingTimeConstant = 0.5;
+        // Мастер-громкость
+        this.masterGain = this.audioCtx.createGain();
+        this.masterGain.gain.setValueAtTime(this.masterVolume, this.audioCtx.currentTime);
 
-        await this.unlockAudioContext();
+        this.masterGain.connect(this.compressor);
+        this.compressor.connect(this.audioCtx.destination);
+
+        // Загрузка изолированного потока ресэмплинга AudioWorklet
+        try {
+            await this.audioCtx.audioWorklet.addModule('js/audio-processor.js');
+        } catch (err) {
+            console.error('[AudioManager] Failed to load AudioWorklet module:', err);
+            throw err;
+        }
+
         this.isInitialized = true;
     }
 
-    async unlockAudioContext() {
-        if (!this.audioCtx) return;
-
-        if (this.audioCtx.state === 'suspended') {
-            await this.audioCtx.resume();
-        }
-
-        try {
-            const buffer = this.audioCtx.createBuffer(1, 1, 22050);
-            const source = this.audioCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(this.audioCtx.destination);
-            source.start(0);
-        } catch (e) { }
-    }
-
-    async ensureWorkletLoaded() {
-        if (this.isWorkletLoaded) return;
-        try {
-            await this.audioCtx.audioWorklet.addModule('js/audio-processor.js');
-            this.isWorkletLoaded = true;
-        } catch (err) {
-            // Повторная попытка с абсолютным путем
-            await this.audioCtx.audioWorklet.addModule('/js/audio-processor.js');
-            this.isWorkletLoaded = true;
-        }
-    }
-
-    // В web/js/audio.js -> метод startMicrophone:
-    async startMicrophone(echoCancellation = false) { // По умолчанию отключаем AEC
+    /**
+     * Запуск захвата микрофона
+     */
+    async startMicrophone(enableEchoCancellation = false) {
         await this.init();
-        await this.unlockAudioContext();
-        await this.ensureWorkletLoaded();
 
         if (this.micStream) {
             this.stopMicrophone();
         }
 
-        // Чистый аппаратный захват без разрывов буфера
         const constraints = {
             audio: {
-                echoCancellation: Boolean(echoCancellation),
-                noiseSuppression: false, // Отключаем спектральный шумодав браузера
-                autoGainControl: false,  // AGC уже делает наш Go-сервер
+                echoCancellation: enableEchoCancellation,
+                noiseSuppression: false, // Noise-Gate и VAD работают на Go-сервере
+                autoGainControl: false,  // AGC работает на сервере
                 channelCount: 1,
-                latency: 0               // Запрос на минимальный hardware buffer
+                sampleRate: 48000
             },
             video: false
         };
 
-        this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
-        this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
+        try {
+            this.micStream = await navigator.mediaDevices.getUserMedia(constraints);
+            this.micSourceNode = this.audioCtx.createMediaStreamSource(this.micStream);
 
-        this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture-processor');
+            // Инициализация собственного анализатора спектра для визуализатора
+            this.selfAnalyser = this.audioCtx.createAnalyser();
+            this.selfAnalyser.fftSize = 64;
+            this.selfAnalyser.smoothingTimeConstant = 0.4;
+            this.micSourceNode.connect(this.selfAnalyser);
 
-        this.workletNode.port.onmessage = (event) => {
-            if (this.isMuted) return;
-            const pcm16Buffer = event.data;
-            if (this.onAudioFrame && pcm16Buffer) {
-                this.onAudioFrame(pcm16Buffer);
-            }
-        };
+            // Создание ноды AudioWorklet
+            this.workletNode = new AudioWorkletNode(this.audioCtx, 'pcm-capture-processor');
+            this.workletNode.port.onmessage = (event) => {
+                if (event.data && this.onAudioFrame && !this.isMuted) {
+                    this.onAudioFrame(event.data);
+                }
+            };
 
-        this.micSourceNode.connect(this.analyserNode);
-        this.micSourceNode.connect(this.workletNode);
+            this.micSourceNode.connect(this.workletNode);
+
+            // Запуск детекции речи локального микрофона
+            this.startLocalVAD();
+        } catch (err) {
+            console.error('[AudioManager] getUserMedia error:', err);
+            throw err;
+        }
     }
 
+    /**
+     * Остановка микрофона
+     */
     stopMicrophone() {
         if (this.micStream) {
-            this.micStream.getTracks().forEach(t => t.stop());
+            this.micStream.getTracks().forEach(track => track.stop());
             this.micStream = null;
         }
+        if (this.micSourceNode) {
+            try { this.micSourceNode.disconnect(); } catch (e) { }
+            this.micSourceNode = null;
+        }
         if (this.workletNode) {
-            this.workletNode.disconnect();
+            try { this.workletNode.disconnect(); } catch (e) { }
             this.workletNode = null;
         }
-        if (this.micSourceNode) {
-            this.micSourceNode.disconnect();
-            this.micSourceNode = null;
+        if (this.selfAnalyser) {
+            try { this.selfAnalyser.disconnect(); } catch (e) { }
+            this.selfAnalyser = null;
+        }
+        if (this.onSpeakingStateChange) {
+            this.onSpeakingStateChange('self', false);
         }
     }
 
+    /**
+     * Переключение режима Mute
+     */
     toggleMute() {
         this.isMuted = !this.isMuted;
         if (this.workletNode) {
             this.workletNode.port.postMessage({ isMuted: this.isMuted });
         }
-        if (this.isMuted && this.onSpeakingStateChange) {
+        if (this.onSpeakingStateChange && this.isMuted) {
             this.onSpeakingStateChange('self', false);
         }
         return this.isMuted;
     }
 
-    setMasterVolume(val) {
-        if (this.masterGainNode && this.audioCtx) {
-            this.masterGainNode.gain.setValueAtTime(val, this.audioCtx.currentTime);
+    /**
+     * Получение или создание аудио-пайплайна для конкретного участника
+     */
+    getParticipantPipeline(userId) {
+        let p = this.participants.get(userId);
+        if (!p) {
+            const gainNode = this.audioCtx.createGain();
+            gainNode.gain.setValueAtTime(1.0, this.audioCtx.currentTime);
+
+            const analyser = this.audioCtx.createAnalyser();
+            analyser.fftSize = 64;
+            analyser.smoothingTimeConstant = 0.4;
+            gainNode.connect(analyser);
+
+            // Проверяем: если комната создана с режимом Minecraft и активен SpatialEngine
+            if (window.appState && window.appState.minecraftMode && window.appState.spatialEngine) {
+                window.appState.spatialEngine.createSpatialChain(userId, gainNode, this.masterGain);
+            } else {
+                gainNode.connect(this.masterGain);
+            }
+
+            p = {
+                gainNode,
+                analyser,
+                nextPlayTime: 0,
+                speakingTimeout: null,
+                isSpeaking: false
+            };
+
+            this.participants.set(userId, p);
         }
-    }
-
-    setParticipantVolume(senderId, val) {
-        const participant = this.participants.get(senderId);
-        if (participant && participant.gainNode && this.audioCtx) {
-            participant.gainNode.gain.setValueAtTime(val, this.audioCtx.currentTime);
-        }
-    }
-
-    createParticipantAudioChain(senderId) {
-        const gainNode = this.audioCtx.createGain();
-        gainNode.gain.value = 1.0;
-
-        const analyser = this.audioCtx.createAnalyser();
-        analyser.fftSize = 64;
-        analyser.smoothingTimeConstant = 0.5;
-
-        gainNode.connect(analyser);
-        analyser.connect(this.masterGainNode);
-
-        const participant = {
-            gainNode,
-            analyser,
-            freqData: new Uint8Array(analyser.frequencyBinCount),
-            nextPlayTime: 0
-        };
-
-        this.participants.set(senderId, participant);
-        return participant;
-    }
-
-    removeParticipant(senderId) {
-        const participant = this.participants.get(senderId);
-        if (participant) {
-            try {
-                participant.gainNode.disconnect();
-                participant.analyser.disconnect();
-            } catch (e) { }
-            this.participants.delete(senderId);
-        }
+        return p;
     }
 
     /**
-     * Адаптивное планирование с защитой от джиттера WAN сетей
+     * Декодирование бинарного пакета и бесшовное планирование воспроизведения
+     * Формат пакета: [uint16 userIdLen][userId bytes][padding?][int16 PCM...]
      */
-    async playAudioPacket(arrayBuffer) {
-        if (!this.audioCtx) return;
-
-        if (this.audioCtx.state === 'suspended') {
-            try {
-                await this.audioCtx.resume();
-            } catch (e) {
-                return;
-            }
+    playAudioPacket(arrayBuffer) {
+        if (!this.audioCtx || this.audioCtx.state === 'suspended') {
+            return;
         }
 
         const dataView = new DataView(arrayBuffer);
         if (dataView.byteLength < 4) return;
 
-        const idLen = dataView.getUint16(0, false);
-        const padding = (idLen % 2 !== 0) ? 1 : 0;
-        const pcmOffset = 2 + idLen + padding;
+        // 1. Чтение UserID
+        const userIdLen = dataView.getUint16(0, false); // BigEndian
+        const userIdOffset = 2;
+        if (dataView.byteLength < userIdOffset + userIdLen) return;
 
-        if (dataView.byteLength <= pcmOffset) return;
+        const userIdBytes = new Uint8Array(arrayBuffer, userIdOffset, userIdLen);
+        const userId = this.textDecoder.decode(userIdBytes);
 
-        const idBytes = new Uint8Array(arrayBuffer, 2, idLen);
-        const senderId = this.textDecoder.decode(idBytes);
+        // Выравнивание PCM сэмплов
+        let pcmOffset = userIdOffset + userIdLen;
+        if (userIdLen % 2 !== 0) {
+            pcmOffset += 1;
+        }
 
-        const pcmByteLength = dataView.byteLength - pcmOffset;
-        const sampleCount = Math.floor(pcmByteLength / 2);
-        if (sampleCount === 0) return;
+        const pcmBytesLen = dataView.byteLength - pcmOffset;
+        const sampleCount = pcmBytesLen / 2;
+        if (sampleCount <= 0) return;
 
-        // Распаковка PCM Int16 -> Float32
-        const float32Data = new Float32Array(sampleCount);
+        // 2. Преобразование LittleEndian Int16 в Float32 (-1.0 ... 1.0)
+        const floatSamples = new Float32Array(sampleCount);
         for (let i = 0; i < sampleCount; i++) {
             const int16 = dataView.getInt16(pcmOffset + i * 2, true);
-            float32Data[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
+            floatSamples[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
         }
 
-        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.targetSampleRate);
-        audioBuffer.getChannelData(0).set(float32Data);
+        // 3. Создание AudioBuffer с исходным квантом 16 кГц
+        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
+        audioBuffer.copyToChannel(floatSamples, 0);
 
-        let participant = this.participants.get(senderId);
-        if (!participant) {
-            participant = this.createParticipantAudioChain(senderId);
-        }
+        const pipeline = this.getParticipantPipeline(userId);
+        const sourceNode = this.audioCtx.createBufferSource();
+        sourceNode.buffer = audioBuffer;
+        sourceNode.connect(pipeline.gainNode);
 
+        // 4. Sample-Accurate Timeline Scheduling (Борьба с джиттером и накоплением задержки)
         const now = this.audioCtx.currentTime;
-        const frameDuration = sampleCount / this.targetSampleRate;
+        const safetyLeadTime = 0.025; // 25 мс буфер безопасности
 
-        // Управление джиттер-буфером
-        if (participant.nextPlayTime < now) {
-            // Если сеть затормозила и очередь опустела, планируем с легким запасом вперед
-            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
-        } else if ((participant.nextPlayTime - now) > this.maxDriftSec) {
-            // Если из-за всплеска пакетов очередь ушла вперед больше чем на maxDriftSec, мягко сгоняем лаг
-            participant.nextPlayTime = now + (this.jitterBufferMs / 1000);
+        if (pipeline.nextPlayTime < now) {
+            pipeline.nextPlayTime = now + safetyLeadTime;
+        } else if (pipeline.nextPlayTime > now + 0.150) {
+            // Если очередь превысила 150 мс из-за лага сети, сбрасываем timeline
+            pipeline.nextPlayTime = now + safetyLeadTime;
         }
 
-        const source = this.audioCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(participant.gainNode);
+        sourceNode.start(pipeline.nextPlayTime);
+        pipeline.nextPlayTime += audioBuffer.duration;
 
-        source.start(participant.nextPlayTime);
-        participant.nextPlayTime += frameDuration;
-
-        this.triggerSpeaking(senderId);
+        // 5. Детекция активности голоса для анимации карточки в UI
+        this.triggerParticipantVAD(userId, pipeline);
     }
 
-    triggerSpeaking(userId) {
-        if (this.onSpeakingStateChange) {
-            this.onSpeakingStateChange(userId, true);
+    /**
+     * VAD для удаленного участника
+     */
+    triggerParticipantVAD(userId, pipeline) {
+        if (!pipeline.isSpeaking) {
+            pipeline.isSpeaking = true;
+            if (this.onSpeakingStateChange) {
+                this.onSpeakingStateChange(userId, true);
+            }
+        }
 
-            if (this.speakingTimeouts.has(userId)) {
-                clearTimeout(this.speakingTimeouts.get(userId));
+        if (pipeline.speakingTimeout) {
+            clearTimeout(pipeline.speakingTimeout);
+        }
+
+        // 250 мс удержание статуса речи
+        pipeline.speakingTimeout = setTimeout(() => {
+            pipeline.isSpeaking = false;
+            if (this.onSpeakingStateChange) {
+                this.onSpeakingStateChange(userId, false);
+            }
+        }, 250);
+    }
+
+    /**
+     * VAD локального микрофона
+     */
+    startLocalVAD() {
+        const checkVAD = () => {
+            if (!this.micStream || !this.selfAnalyser) return;
+
+            const freqData = new Uint8Array(this.selfAnalyser.frequencyBinCount);
+            this.selfAnalyser.getByteFrequencyData(freqData);
+
+            let sum = 0;
+            for (let i = 0; i < freqData.length; i++) {
+                sum += freqData[i];
+            }
+            const avg = sum / freqData.length;
+            const isSpeaking = !this.isMuted && avg > 14;
+
+            if (this.onSpeakingStateChange) {
+                this.onSpeakingStateChange('self', isSpeaking);
             }
 
-            const tid = setTimeout(() => {
-                this.onSpeakingStateChange(userId, false);
-                this.speakingTimeouts.delete(userId);
-            }, 250);
-
-            this.speakingTimeouts.set(userId, tid);
-        }
+            setTimeout(checkVAD, 80);
+        };
+        checkVAD();
     }
 
+    /**
+     * Получение частотных данных для 60 FPS Canvas-визуализатора
+     */
     getFrequencyData(userId) {
-        if (!this.audioCtx) return null;
-
         if (userId === 'self') {
-            if (!this.analyserNode || this.isMuted) return null;
-            const data = new Uint8Array(this.analyserNode.frequencyBinCount);
-            this.analyserNode.getByteFrequencyData(data);
+            if (!this.selfAnalyser) return null;
+            const data = new Uint8Array(this.selfAnalyser.frequencyBinCount);
+            this.selfAnalyser.getByteFrequencyData(data);
             return data;
         }
 
-        const participant = this.participants.get(userId);
-        if (!participant || !participant.analyser) return null;
+        const p = this.participants.get(userId);
+        if (!p || !p.analyser) return null;
 
-        participant.analyser.getByteFrequencyData(participant.freqData);
-        return participant.freqData;
+        const data = new Uint8Array(p.analyser.frequencyBinCount);
+        p.analyser.getByteFrequencyData(data);
+        return data;
+    }
+
+    /**
+     * Установка индивидуальной громкости участника
+     */
+    setParticipantVolume(userId, volume) {
+        const p = this.participants.get(userId);
+        if (p && p.gainNode) {
+            p.gainNode.gain.setValueAtTime(volume, this.audioCtx.currentTime);
+        }
+    }
+
+    /**
+     * Установка общей громкости
+     */
+    setMasterVolume(volume) {
+        this.masterVolume = volume;
+        if (this.masterGain && this.audioCtx) {
+            this.masterGain.gain.setValueAtTime(volume, this.audioCtx.currentTime);
+        }
+    }
+
+    /**
+     * Удаление участника при выходе из комнаты
+     */
+    removeParticipant(userId) {
+        const p = this.participants.get(userId);
+        if (p) {
+            if (p.speakingTimeout) clearTimeout(p.speakingTimeout);
+            try { p.gainNode.disconnect(); } catch (e) { }
+            try { p.analyser.disconnect(); } catch (e) { }
+            this.participants.delete(userId);
+        }
     }
 }
 
+// Экспортируем единственный экземпляр аудио-менеджера в глобальную область
 window.audioManager = new AudioManager();

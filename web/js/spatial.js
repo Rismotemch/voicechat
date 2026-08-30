@@ -115,7 +115,7 @@ class SpatialAudioEngine {
     }
 
     /**
-     * Обновление координат слушателя (локального игрока)
+     * Обновление позиции и направления взгляда слушателя (Minecraft Yaw/Pitch)
      */
     updateListener(x, y, z, yaw, pitch, inCave) {
         if (!this.am.audioCtx) return;
@@ -124,32 +124,39 @@ class SpatialAudioEngine {
 
         this.listenerPos = { x, y, z, yaw, pitch, inCave };
 
-        // Установка позиции слушателя
+        // 1. Позиция слушателя
         if (ctx.listener.positionX) {
-            ctx.listener.positionX.setValueAtTime(x, now);
-            ctx.listener.positionY.setValueAtTime(y, now);
-            ctx.listener.positionZ.setValueAtTime(z, now);
+            ctx.listener.positionX.setTargetAtTime(x, now, 0.05);
+            ctx.listener.positionY.setTargetAtTime(y, now, 0.05);
+            ctx.listener.positionZ.setTargetAtTime(z, now, 0.05);
         } else {
             ctx.listener.setPosition(x, y, z);
         }
 
-        // Вектор направления взгляда из углов Эйлера Minecraft
-        const yawRad = (yaw + 90) * (Math.PI / 180);
-        const pitchRad = -pitch * (Math.PI / 180);
+        // 2. Вектор направления взгляда в координатах Minecraft:
+        // yaw 0 = +Z (Юг), yaw 90 = -X (Запад), yaw 180 = -Z (Север), yaw 270 = +X (Восток)
+        const yawRad = yaw * (Math.PI / 180.0);
+        const pitchRad = pitch * (Math.PI / 180.0);
 
-        const fwdX = Math.cos(pitchRad) * Math.cos(yawRad);
-        const fwdY = Math.sin(pitchRad);
-        const fwdZ = Math.cos(pitchRad) * Math.sin(yawRad);
+        const cosPitch = Math.cos(pitchRad);
+        const fwdX = -Math.sin(yawRad) * cosPitch;
+        const fwdY = -Math.sin(pitchRad);
+        const fwdZ = Math.cos(yawRad) * cosPitch;
+
+        // Вектор "Верх" (перпендикулярен направлению взгляда)
+        const upX = -Math.sin(yawRad) * -Math.sin(pitchRad);
+        const upY = Math.cos(pitchRad);
+        const upZ = Math.cos(yawRad) * -Math.sin(pitchRad);
 
         if (ctx.listener.forwardX) {
-            ctx.listener.forwardX.setValueAtTime(fwdX, now);
-            ctx.listener.forwardY.setValueAtTime(fwdY, now);
-            ctx.listener.forwardZ.setValueAtTime(fwdZ, now);
-            ctx.listener.upX.setValueAtTime(0, now);
-            ctx.listener.upY.setValueAtTime(1, now);
-            ctx.listener.upZ.setValueAtTime(0, now);
+            ctx.listener.forwardX.setTargetAtTime(fwdX, now, 0.05);
+            ctx.listener.forwardY.setTargetAtTime(fwdY, now, 0.05);
+            ctx.listener.forwardZ.setTargetAtTime(fwdZ, now, 0.05);
+            ctx.listener.upX.setTargetAtTime(upX, now, 0.05);
+            ctx.listener.upY.setTargetAtTime(upY, now, 0.05);
+            ctx.listener.upZ.setTargetAtTime(upZ, now, 0.05);
         } else {
-            ctx.listener.setOrientation(fwdX, fwdY, fwdZ, 0, 1, 0);
+            ctx.listener.setOrientation(fwdX, fwdY, fwdZ, upX, upY, upZ);
         }
     }
 
