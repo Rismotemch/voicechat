@@ -8,33 +8,32 @@ import (
 
 const (
 	// Аудио спецификация
-	SampleRate      = 16000 // 16 kHz
-	FrameDurationMs = 20    // 20 мс
-	SamplesPerFrame = 320   // 320 сэмплов
-	BytesPerFrame   = 640   // 640 байт
-	MaxSenderIDLen  = 128
+	SampleRate      = 16000 // 16 kHz: стандарт для передачи голоса
+	FrameDurationMs = 20    // 20 мс квант аудио
+	SamplesPerFrame = 320   // 16000 * 0.02 = 320 сэмплов
+	BytesPerFrame   = 640   // 320 сэмплов * 2 байта (Int16)
+	MaxSenderIDLen  = 128   // Максимальная длина ID для заголовка пакета
 
-	// DSP и шумоподавление
-	HighPassCutoffFreq = 120.0 // Срезаем низкочастотный гул кулера (до 120 Гц)
-	HighPassQ          = 0.707
-	VADEnergyThreshold = 0.006 // Порог речи (отсекает тихий шум вентилятора)
-	VADHangoverFrames  = 25    // Удержание хвоста речи (25 фреймов = 500 мс без стробирования)
-	TargetRMS          = 0.12  // Целевой уровень AGC
-	MaxGainMultiplier  = 2.2   // Ограничение усиления фонового шума
+	// Параметры фильтрации и гейта
+	HighPassCutoffFreq = 140.0 // Срезаем низкочастотный гул кулера (до 140 Гц)
+	HighPassQ          = 0.707 // Добротность фильтра Баттерворта
+	NoiseGateThreshold = 0.008 // Порог открытия гейта
+	SpeechThreshold    = 0.015 // Порог для работы AGC (только голос)
+	VADHangoverFrames  = 20    // 400 мс удержание хвоста слов (20 фреймов)
+	TargetRMS          = 0.12  // Целевой уровень RMS для AGC
+	MaxGainMultiplier  = 2.0   // Ограничение усиления слабого сигнала
 )
 
 // =============================================================================
 // Пул буферов памяти (Zero-Allocation)
 // =============================================================================
 
-var (
-	pcmSamplePool = sync.Pool{
-		New: func() any {
-			s := make([]float32, SamplesPerFrame)
-			return &s
-		},
-	}
-)
+var pcmSamplePool = sync.Pool{
+	New: func() any {
+		s := make([]float32, SamplesPerFrame)
+		return &s
+	},
+}
 
 // =============================================================================
 // DSP: Biquad Filter (HighPass, LowPass, BandPass)
@@ -140,6 +139,7 @@ type AudioProcessor struct {
 	hangoverCount int
 	isSpeaking    bool
 	currentGain   float32
+	gateEnvelope  float32 // Плавная огибающая гейта (0.0 ... 1.0)
 	activeFilter  string
 
 	radioHPFilter *BiquadFilter
@@ -153,6 +153,7 @@ func NewAudioProcessor() *AudioProcessor {
 	return &AudioProcessor{
 		hpFilter:      newHighPassFilter(SampleRate, HighPassCutoffFreq, HighPassQ),
 		currentGain:   1.0,
+		gateEnvelope:  0.0,
 		activeFilter:  "none",
 		radioHPFilter: newHighPassFilter(SampleRate, 400.0, 0.707),
 		radioLPFilter: newLowPassFilter(SampleRate, 2600.0, 0.707),
@@ -181,39 +182,57 @@ func (p *AudioProcessor) ProcessFrame(samples []float32) bool {
 	}
 	rms := float32(math.Sqrt(float64(sum / float32(n))))
 
-	// 3. Двухуровневый VAD с защитой от стробирования
-	if rms >= VADEnergyThreshold {
+	// 3. VAD и целевой уровень гейта
+	var targetGate float32
+	if rms >= NoiseGateThreshold {
 		p.hangoverCount = VADHangoverFrames
 		p.isSpeaking = true
+		targetGate = 1.0
 	} else if p.hangoverCount > 0 {
 		p.hangoverCount--
 		p.isSpeaking = true
+		targetGate = 1.0
 	} else {
 		p.isSpeaking = false
+		targetGate = 0.0
+	}
+
+	// Если гейт закрыт и огибающая затухла — отбрасываем тишину
+	if !p.isSpeaking && p.gateEnvelope < 0.01 {
+		p.gateEnvelope = 0.0
 		for i := 0; i < n; i++ {
 			samples[i] = 0
 		}
-		p.currentGain = 1.0
 		return false
 	}
 
-	// 4. Применение голосовых эффектов
-	p.applyVoiceEffects(samples)
-
-	// 5. AGC (без чрезмерного разгона шума)
-	if rms > 0.005 {
+	// 4. AGC: реагирует только на голос (rms >= SpeechThreshold), не разгоняя тихий шум
+	if rms >= SpeechThreshold {
 		desiredGain := TargetRMS / rms
 		if desiredGain > MaxGainMultiplier {
 			desiredGain = MaxGainMultiplier
 		} else if desiredGain < 0.6 {
 			desiredGain = 0.6
 		}
-		p.currentGain = p.currentGain*0.92 + desiredGain*0.08
+		p.currentGain = p.currentGain*0.95 + desiredGain*0.05
 	}
 
-	// 6. Усиление и мягкий лимитер
+	// 5. Применение голосовых эффектов
+	p.applyVoiceEffects(samples)
+
+	// 6. Плавное применение гейта по сэмплам (Attack: быстрый, Release: мягкий)
+	var envStep float32
+	if targetGate > p.gateEnvelope {
+		envStep = 0.15 // Быстрая атака (без проглатывания начала слов)
+	} else {
+		envStep = 0.02 // Мягкий спад (без щелчков обрыва)
+	}
+
 	for i := 0; i < n; i++ {
-		val := samples[i] * p.currentGain
+		p.gateEnvelope += (targetGate - p.gateEnvelope) * envStep
+		val := samples[i] * p.currentGain * p.gateEnvelope
+
+		// Мягкий лимитер
 		if val > 1.0 {
 			val = 1.0
 		} else if val < -1.0 {
@@ -293,6 +312,7 @@ func (p *AudioProcessor) Reset() {
 	p.hangoverCount = 0
 	p.isSpeaking = false
 	p.currentGain = 1.0
+	p.gateEnvelope = 0.0
 	p.modPhase = 0
 }
 

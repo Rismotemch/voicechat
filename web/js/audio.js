@@ -84,11 +84,10 @@ class AudioManager {
         const constraints = {
             audio: {
                 echoCancellation: enableEchoCancellation,
-                noiseSuppression: false,
-                autoGainControl: false,
+                noiseSuppression: true, // Включает нативное шумоподавление (убирает кулеры и фон)
+                autoGainControl: false,  // AGC контролирует наш Go-сервер
                 channelCount: 1,
-                sampleRate: 48000,
-                latency: 0.01 // Запрос минимальной аппаратной задержки
+                sampleRate: 48000
             },
             video: false
         };
@@ -115,6 +114,57 @@ class AudioManager {
             console.error('[AudioManager] getUserMedia error:', err);
             throw err;
         }
+    }
+
+    playAudioPacket(arrayBuffer) {
+        if (!this.audioCtx || this.audioCtx.state === 'suspended') return;
+
+        const dataView = new DataView(arrayBuffer);
+        if (dataView.byteLength < 4) return;
+
+        const userIdLen = dataView.getUint16(0, false);
+        const userIdOffset = 2;
+        if (dataView.byteLength < userIdOffset + userIdLen) return;
+
+        const userIdBytes = new Uint8Array(arrayBuffer, userIdOffset, userIdLen);
+        const userId = this.textDecoder.decode(userIdBytes);
+
+        let pcmOffset = userIdOffset + userIdLen;
+        if (userIdLen % 2 !== 0) pcmOffset += 1;
+
+        const pcmBytesLen = dataView.byteLength - pcmOffset;
+        const sampleCount = pcmBytesLen / 2;
+        if (sampleCount <= 0) return;
+
+        const floatSamples = new Float32Array(sampleCount);
+        for (let i = 0; i < sampleCount; i++) {
+            const int16 = dataView.getInt16(pcmOffset + i * 2, true);
+            floatSamples[i] = int16 < 0 ? int16 / 32768.0 : int16 / 32767.0;
+        }
+
+        const audioBuffer = this.audioCtx.createBuffer(1, sampleCount, this.sampleRate);
+        audioBuffer.copyToChannel(floatSamples, 0);
+
+        const pipeline = this.getParticipantPipeline(userId);
+        const sourceNode = this.audioCtx.createBufferSource();
+        sourceNode.buffer = audioBuffer;
+        sourceNode.connect(pipeline.gainNode);
+
+        const now = this.audioCtx.currentTime;
+        const startupLead = 0.060; // 60 мс подушка безопасности при старте фразы
+        const maxLead = 0.140;     // Сброс только при накоплении более 140 мс
+
+        // Если это первый пакет после паузы или очередь отстала от реального времени
+        if (pipeline.nextPlayTime < now) {
+            pipeline.nextPlayTime = now + startupLead;
+        } else if (pipeline.nextPlayTime > now + maxLead) {
+            pipeline.nextPlayTime = now + startupLead;
+        }
+
+        sourceNode.start(pipeline.nextPlayTime);
+        pipeline.nextPlayTime += audioBuffer.duration;
+
+        this.triggerParticipantVAD(userId, pipeline);
     }
 
     /**
