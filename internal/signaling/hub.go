@@ -413,9 +413,13 @@ func (c *Client) handleTextMessage(data []byte) {
 		}
 		if err := json.Unmarshal(msg.Payload, &p); err == nil {
 			c.Hub.mu.RLock()
-			// Пересылаем команду браузеру пользователя, чтобы он открыл/закрыл поток
 			for _, cl := range c.Hub.clients {
 				if cl.User != nil && strings.EqualFold(cl.User.Name, p.UserName) {
+					// 1. Мгновенно управляем передачей на уровне сервера (0 мс задержки)
+					if cl.AudioClient != nil {
+						cl.AudioClient.SetMute(!p.IsPressed)
+					}
+					// 2. Шлем событие в браузер только для анимации кнопки/аватарки
 					cl.sendJSON("ptt_trigger", map[string]bool{"isPressed": p.IsPressed})
 				}
 			}

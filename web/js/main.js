@@ -496,8 +496,14 @@
                     onUserLeft(msg.payload);
                     break;
                 case 'ptt_trigger':
-                    if (state.activationMode === 'ptt') {
-                        setPttState(Boolean(msg.payload.isPressed));
+                    const pressed = Boolean(msg.payload.isPressed);
+                    state.isPttPressed = pressed;
+                    if (dom.micBtn) {
+                        dom.micBtn.classList.toggle('ptt-active', pressed);
+                        dom.micBtn.textContent = pressed ? '🎙️' : '📻';
+                    }
+                    if (state.user) {
+                        updateSpeakingUI(state.user.id, pressed);
                     }
                     break;
                 case 'user_muted':
